@@ -59,12 +59,18 @@ struct Context {
     // new job is submitted from the UI thread, so a cancel only
     // applies to jobs submitted before it.
     std::atomic<bool> cancel_pending{false};
+
+    // Full path to the loaded .aup2 project file, or empty if unsaved.
+    std::wstring project_path;
 };
 
 Context& context();
 
 void init_context(HOST_APP_TABLE* host);
 void shutdown_context();
+
+void set_project_path(std::wstring_view path);
+std::wstring get_project_path();
 
 void set_log_handle(LOG_HANDLE* handle);
 void set_config_handle(CONFIG_HANDLE* handle);

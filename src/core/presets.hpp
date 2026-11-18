@@ -32,8 +32,11 @@
 namespace hybrid {
 
 // Generate the ffedit script for one preset. Deterministic: the same
-// (preset, strength, seed) always produces the same text.
-std::string generate_preset_js(PresetId preset, int strength, std::uint32_t seed);
+// (preset, strength, seed, angle, cut_offset) always produces the same text.
+std::string generate_preset_js(PresetId preset, int strength, std::uint32_t seed,
+                               int angle = 0, std::int64_t cut_offset = -1,
+                               std::int64_t total_frames = 0);
+std::string generate_preset_js(const Settings& settings);
 
 // The fixed vector MV固定 writes, derived from the seed. Exposed so
 // tests can check the JS embeds the same numbers.
@@ -64,6 +67,11 @@ int random_range(int strength) noexcept;
 //     8 at strength 100.
 //   Stop: factor MVs are scaled towards zero: 1.0 at strength 0,
 //     0.0 at strength 100.
+//   Fluid: number of past frames to average: 2 at strength 0,
+//     16 at strength 100.
+//   Ripple: amplitude and spatial frequency of sine wave across rows.
+//   Gravity: downward acceleration added per frame to active vectors:
+//     0.2 at strength 0, 2.0 at strength 100.
 double zoom_factor(int strength, double dist_ratio) noexcept;
 int shear_offset(int strength, int y, int rows) noexcept;
 int shift_offset(std::uint32_t seed, int strength) noexcept;
@@ -72,5 +80,9 @@ int buffer_delay_frames() noexcept;
 double vibrate_amplitude(int strength) noexcept;
 int sink_offset(int strength) noexcept;
 double stop_factor(int strength) noexcept;
+int fluid_window_frames(int strength) noexcept;
+double ripple_amplitude(int strength) noexcept;
+double ripple_frequency(int strength) noexcept;
+double gravity_acceleration(int strength) noexcept;
 
 } // namespace hybrid

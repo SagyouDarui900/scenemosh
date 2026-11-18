@@ -1,6 +1,6 @@
 // panel.cpp — see panel.hpp.
 //
-// Layout (client area 540x670 in 96-DPI design units, all controls
+// Layout (client area 420x700 in 96-DPI design units, all controls
 // created in WM_CREATE; design doc section 22 for the UX fixes):
 //   手順の見出し (1 検出 → 2 生成 → 3 配置)
 //   [1. 検出する範囲] 対象レイヤー / 繋ぎ目前 / 繋ぎ目後 /
@@ -87,6 +87,9 @@ constexpr int kIdProgressBar = 119;
 constexpr int kIdProgressLabel = 120;
 constexpr int kIdModeCutRadio = 121;
 constexpr int kIdModeObjectRadio = 122;
+constexpr int kIdSummaryLabel = 123;
+constexpr int kIdAngleLabel = 124;
+constexpr int kIdAngleEdit = 125;
 
 // Posted by a job's finished callback (worker thread) when one panel
 // job ends. wParam = entry index, lParam = 1 when ok, 0 on failure.
@@ -152,6 +155,8 @@ struct PanelState {
     int pending_jobs = 0;
     int scene_id = 0;
     int target_layer = 0; // 0-based, from the last scan
+    int fps_num = 30;
+    int fps_den = 1;
     // Progress of the currently running job, written by the worker
     // thread's progress callback and read by the UI thread.
     int progress_entry = -1;
@@ -305,20 +310,25 @@ SegmentMode panel_segment_mode(HWND parent) {
                : SegmentMode::CutCentred;
 }
 
+void update_selection_summary(HWND parent);
+
 // Rebuild the list box from g_state.entries. UI thread only.
 void refresh_list(HWND parent) {
     HWND list = GetDlgItem(parent, kIdSegmentList);
     SendMessageW(list, LB_RESETCONTENT, 0, 0);
-    std::lock_guard<std::mutex> lock(g_state.mutex);
-    for (std::size_t i = 0; i < g_state.entries.size(); ++i) {
-        const std::wstring line = entry_line(g_state.entries[i], static_cast<int>(i));
-        const LRESULT pos = SendMessageW(list, LB_ADDSTRING, 0,
-                                         reinterpret_cast<LPARAM>(line.c_str()));
-        if (pos >= 0) {
-            SendMessageW(list, LB_SETITEMDATA, static_cast<WPARAM>(pos),
-                         static_cast<LPARAM>(i));
+    {
+        std::lock_guard<std::mutex> lock(g_state.mutex);
+        for (std::size_t i = 0; i < g_state.entries.size(); ++i) {
+            const std::wstring line = entry_line(g_state.entries[i], static_cast<int>(i));
+            const LRESULT pos = SendMessageW(list, LB_ADDSTRING, 0,
+                                             reinterpret_cast<LPARAM>(line.c_str()));
+            if (pos >= 0) {
+                SendMessageW(list, LB_SETITEMDATA, static_cast<WPARAM>(pos),
+                             static_cast<LPARAM>(i));
+            }
         }
     }
+    update_selection_summary(parent);
 }
 
 std::vector<int> selected_indices(HWND parent) {
@@ -340,10 +350,47 @@ std::vector<int> selected_indices(HWND parent) {
     return out;
 }
 
+void update_selection_summary(HWND parent) {
+    HWND label = GetDlgItem(parent, kIdSummaryLabel);
+    if (label == nullptr) return;
+    const std::vector<int> sel = selected_indices(parent);
+    std::size_t total_count = 0;
+    std::int64_t total_frames = 0;
+    std::int64_t sel_frames = 0;
+    double fps = 30.0;
+    {
+        std::lock_guard<std::mutex> lock(g_state.mutex);
+        total_count = g_state.entries.size();
+        for (const auto& e : g_state.entries) {
+            total_frames += e.segment.frame_count();
+        }
+        for (int idx : sel) {
+            if (idx >= 0 && idx < static_cast<int>(g_state.entries.size())) {
+                sel_frames += g_state.entries[static_cast<std::size_t>(idx)].segment.frame_count();
+            }
+        }
+        if (g_state.fps_num > 0 && g_state.fps_den > 0) {
+            fps = static_cast<double>(g_state.fps_num) / static_cast<double>(g_state.fps_den);
+        }
+    }
+    std::wstring text;
+    if (sel.empty()) {
+        const double sec = (fps > 0.0) ? (static_cast<double>(total_frames) / fps) : 0.0;
+        text = format_wstring(L"選択中: なし (全 %zu 区間 / 計 %lldf, 約 %.1f秒)",
+                              total_count, static_cast<long long>(total_frames), sec);
+    } else {
+        const double sec = (fps > 0.0) ? (static_cast<double>(sel_frames) / fps) : 0.0;
+        text = format_wstring(L"選択中: %zu 区間 / 計 %lldf (約 %.1f秒)  [全 %zu 区間 / %lldf]",
+                              sel.size(), static_cast<long long>(sel_frames), sec,
+                              total_count, static_cast<long long>(total_frames));
+    }
+    SetWindowTextW(label, text.c_str());
+}
+
 // Build the core Settings for one panel segment. The uid is stable
 // for the same scene / layer / segment, so a re-run reuses the cache.
 Settings build_panel_settings(const SegmentEntry& entry, int preset_index,
-                              int strength, std::uint32_t seed,
+                              int strength, std::uint32_t seed, int angle,
                               const EDIT_INFO& info, bool export_mp4) {
     Settings s;
     int target_layer = 0;
@@ -362,15 +409,21 @@ Settings build_panel_settings(const SegmentEntry& entry, int preset_index,
     s.preset = static_cast<PresetId>(preset_index);
     s.strength = strength;
     s.seed = seed;
+    s.angle = angle;
     s.suppress_iframe = true;
     s.export_mp4 = export_mp4;
-    s.cache_dir = default_cache_dir();
+    s.cache_dir = resolve_cache_dir({});
     s.width = info.width;
     s.height = info.height;
     s.fps_num = info.rate;
     s.fps_den = info.scale;
     s.interval.start_frame = entry.segment.start_frame;
     s.interval.end_frame = entry.segment.end_frame;
+    if (entry.segment.kind == SegmentKind::Cut) {
+        s.cut_offset = entry.segment.cut_frame - entry.segment.start_frame;
+    } else {
+        s.cut_offset = -1;
+    }
     s.normalize();
     return s;
 }
@@ -380,6 +433,19 @@ int panel_preset_index(HWND parent) {
         SendMessageW(GetDlgItem(parent, kIdPresetCombo), CB_GETCURSEL, 0, 0);
     if (sel < 0 || sel >= kPresetCount) return 0;
     return static_cast<int>(sel);
+}
+
+void update_angle_control_visibility(HWND parent) {
+    const int pidx = panel_preset_index(parent);
+    PresetId preset = PresetId::Amplify;
+    if (preset_from_index(pidx, preset)) {
+        const bool show = preset_supports_angle(preset);
+        const int cmd = show ? SW_SHOW : SW_HIDE;
+        HWND lbl = GetDlgItem(parent, kIdAngleLabel);
+        HWND edt = GetDlgItem(parent, kIdAngleEdit);
+        if (lbl != nullptr) ShowWindow(lbl, cmd);
+        if (edt != nullptr) ShowWindow(edt, cmd);
+    }
 }
 
 // Resolve ffmpeg.exe for the panel export step: the text in the
@@ -399,8 +465,8 @@ bool find_generated_cache(const SegmentEntry& entry, const EDIT_INFO& info,
     const bool export_mp4 = control_checked(parent, kIdExportCheck);
     const Settings settings = build_panel_settings(
         entry, panel_preset_index(parent), control_int(parent, kIdStrengthEdit, 50),
-        static_cast<std::uint32_t>(control_int(parent, kIdSeedEdit, 0)), info,
-        export_mp4);
+        static_cast<std::uint32_t>(control_int(parent, kIdSeedEdit, 0)),
+        control_int(parent, kIdAngleEdit, 0), info, export_mp4);
     Context& ctx = context();
     const std::string src_hash =
         compute_src_hash(settings, ctx.ffgac_version);
@@ -594,11 +660,16 @@ void on_detect(HWND parent) {
         }
         g_state.scene_id = info.scene_id;
         g_state.target_layer = layer;
+        g_state.fps_num = info.rate > 0 ? info.rate : 30;
+        g_state.fps_den = info.scale > 0 ? info.scale : 1;
     }
     refresh_list(parent);
+    std::int64_t total_frames = 0;
+    for (const auto& seg : segments) total_frames += seg.frame_count();
     set_status(parent, format_wstring(
-                            L"%d 区間を検出しました。生成する区間を選んでください。",
-                            static_cast<int>(segments.size())));
+                            L"%d 区間を検出しました（計 %lld フレーム）。生成する区間を選んでください。",
+                            static_cast<int>(segments.size()),
+                            static_cast<long long>(total_frames)));
 }
 
 // While a generation is running, [生成] and [検出] cannot be used
@@ -634,8 +705,22 @@ void on_progress(HWND parent, WPARAM wparam) {
         std::lock_guard<std::mutex> lock(g_state.mutex);
         if (g_state.progress_entry != idx) return;
         pct = static_cast<int>(g_state.progress_fraction * 100.0);
-        text = format_wstring(L"生成状況：区間 %d を生成中：%s %d%%",
-                              idx + 1, stage_verb(g_state.progress_stage),
+        const int total = static_cast<int>(g_state.entries.size());
+        const int done_or_gen = [&] {
+            int n = 0;
+            for (const auto& e : g_state.entries) {
+                if (e.status == SegmentStatus::Done ||
+                    e.status == SegmentStatus::Placed ||
+                    e.status == SegmentStatus::Failed) {
+                    ++n;
+                }
+            }
+            return n;
+        }();
+        // "区間 2/5 を生成中：素材をエンコード中 47%"
+        text = format_wstring(L"生成状況：区間 %d/%d を生成中：%s %d%%",
+                              done_or_gen + 1, total,
+                              stage_verb(g_state.progress_stage),
                               pct);
     }
     set_progress_label(parent, text);
@@ -668,6 +753,7 @@ void on_generate(HWND parent) {
     const int strength = control_int(parent, kIdStrengthEdit, 50);
     const std::uint32_t seed =
         static_cast<std::uint32_t>(control_int(parent, kIdSeedEdit, 0));
+    const int angle = control_int(parent, kIdAngleEdit, 0);
     const bool export_mp4 = control_checked(parent, kIdExportCheck);
     const std::filesystem::path ffmpeg_exe = panel_ffmpeg_exe(parent);
     int target_layer = 0;
@@ -688,8 +774,8 @@ void on_generate(HWND parent) {
                 SegmentStatus::Generating;
         }
         const Settings settings =
-            build_panel_settings(entry_copy, preset_index, strength, seed, info,
-                                 export_mp4);
+            build_panel_settings(entry_copy, preset_index, strength, seed, angle,
+                                 info, export_mp4);
         const std::int64_t count = settings.interval.frame_count();
         auto provider = std::make_shared<LayerSourceReader>(
             ctx.edit, target_layer, settings.interval.start_frame, count,
@@ -902,25 +988,25 @@ void build_controls(HWND hwnd) {
     const auto S = [](int v) { return scale_px(v); };
 
     make_control(hwnd, L"STATIC", L"手順： 1 検出 → 2 生成 → 3 配置", 0,
-                 S(12), S(8), S(516), S(16), 0);
+                 S(12), S(8), S(396), S(16), 0);
 
     // 1. 検出する範囲
     make_control(hwnd, L"BUTTON", L"1. 検出する範囲", BS_GROUPBOX, S(12),
-                 S(28), S(516), S(124), 0);
+                 S(28), S(396), S(124), 0);
     make_control(hwnd, L"STATIC", L"対象レイヤー", 0, S(24), S(50), S(100),
                  S(16), 0);
     make_control(hwnd, L"EDIT", L"1", ES_NUMBER | ES_AUTOHSCROLL | WS_BORDER,
                  S(128), S(48), S(72), S(22), kIdLayerEdit);
     make_control(hwnd, L"STATIC", L"(1始まり)", 0, S(208), S(50), S(84),
                  S(16), 0);
-    make_control(hwnd, L"STATIC", L"繋ぎ目前", 0, S(24), S(76), S(100),
+    make_control(hwnd, L"STATIC", L"繋ぎ目前(f)", 0, S(24), S(76), S(100),
                  S(16), 0);
     make_control(hwnd, L"EDIT", L"30", ES_NUMBER | ES_AUTOHSCROLL | WS_BORDER,
-                 S(128), S(74), S(72), S(22), kIdBeforeEdit);
-    make_control(hwnd, L"STATIC", L"繋ぎ目後", 0, S(208), S(76), S(100),
+                 S(128), S(74), S(64), S(22), kIdBeforeEdit);
+    make_control(hwnd, L"STATIC", L"繋ぎ目後(f)", 0, S(204), S(76), S(96),
                  S(16), 0);
     make_control(hwnd, L"EDIT", L"30", ES_NUMBER | ES_AUTOHSCROLL | WS_BORDER,
-                 S(324), S(74), S(72), S(22), kIdAfterEdit);
+                 S(304), S(74), S(64), S(22), kIdAfterEdit);
     // Segment mode (design doc section 26): the first radio starts
     // the group (WS_GROUP) and the next group box ends it, so the
     // two radios check each other and nothing else.
@@ -930,7 +1016,7 @@ void build_controls(HWND hwnd) {
                  BS_AUTORADIOBUTTON | WS_GROUP | WS_TABSTOP, S(128), S(100),
                  S(120), S(20), kIdModeCutRadio);
     make_control(hwnd, L"BUTTON", L"オブジェクト単位",
-                 BS_AUTORADIOBUTTON, S(252), S(100), S(160), S(20),
+                 BS_AUTORADIOBUTTON, S(252), S(100), S(148), S(20),
                  kIdModeObjectRadio);
     CheckDlgButton(hwnd,
                    load_panel_segment_mode() == SegmentMode::ObjectBased
@@ -938,12 +1024,12 @@ void build_controls(HWND hwnd) {
                        : kIdModeCutRadio,
                    BST_CHECKED);
     make_control(hwnd, L"STATIC",
-                 L"繋ぎ目の前後何フレームを取り込むか。範囲選択時はその範囲だけ走査します。",
-                 0, S(24), S(124), S(492), S(16), 0);
+                 L"繋ぎ目の前後何フレームを取り込むか (合計=前+後)。範囲選択時は選択範囲のみ走査。",
+                 0, S(24), S(124), S(372), S(16), 0);
 
     // 2. 生成する内容
     make_control(hwnd, L"BUTTON", L"2. 生成する内容",
-                 BS_GROUPBOX | WS_GROUP, S(12), S(158), S(516), S(100), 0);
+                 BS_GROUPBOX | WS_GROUP, S(12), S(158), S(396), S(100), 0);
     make_control(hwnd, L"STATIC", L"プリセット", 0, S(24), S(180), S(100),
                  S(16), 0);
     HWND combo = make_control(hwnd, L"COMBOBOX", L"",
@@ -956,67 +1042,69 @@ void build_controls(HWND hwnd) {
                              static_cast<PresetId>(i))).c_str()));
     }
     SendMessageW(combo, CB_SETCURSEL, 0, 0);
-    make_control(hwnd, L"STATIC", L"強度", 0, S(24), S(206), S(100), S(16),
-                 0);
+    make_control(hwnd, L"STATIC", L"強度", 0, S(24), S(206), S(36), S(16), 0);
     make_control(hwnd, L"EDIT", L"50", ES_NUMBER | ES_AUTOHSCROLL | WS_BORDER,
-                 S(128), S(204), S(72), S(22), kIdStrengthEdit);
-    make_control(hwnd, L"STATIC", L"seed", 0, S(208), S(206), S(56), S(16),
-                 0);
+                 S(64), S(204), S(52), S(22), kIdStrengthEdit);
+    make_control(hwnd, L"STATIC", L"seed", 0, S(126), S(206), S(36), S(16), 0);
     make_control(hwnd, L"EDIT", L"0", ES_NUMBER | ES_AUTOHSCROLL | WS_BORDER,
-                 S(268), S(204), S(84), S(22), kIdSeedEdit);
+                 S(166), S(204), S(56), S(22), kIdSeedEdit);
+    make_control(hwnd, L"STATIC", L"角度(°)", 0, S(234), S(206), S(52), S(16),
+                 kIdAngleLabel);
+    make_control(hwnd, L"EDIT", L"0", ES_NUMBER | ES_AUTOHSCROLL | WS_BORDER,
+                 S(290), S(204), S(56), S(22), kIdAngleEdit);
     make_control(hwnd, L"STATIC",
-                 L"強度と seed が効かないモードがあります。詳しくは README のプリセット一覧を参照。",
-                 0, S(24), S(230), S(492), S(16), 0);
+                 L"プリセットにより強度・seed・角度の有効/無効が異なります。",
+                 0, S(24), S(230), S(372), S(16), 0);
 
     // 3. 配置と出力
     make_control(hwnd, L"BUTTON", L"3. 配置と出力", BS_GROUPBOX, S(12),
-                 S(264), S(516), S(144), 0);
+                 S(264), S(396), S(160), 0);
     make_control(hwnd, L"STATIC", L"配置先レイヤー", 0, S(24), S(286),
                  S(180), S(16), 0);
     make_control(hwnd, L"EDIT", L"0", ES_NUMBER | ES_AUTOHSCROLL | WS_BORDER,
                  S(212), S(284), S(72), S(22), kIdFallbackEdit);
     make_control(hwnd, L"STATIC", L"0=自動：上の空きレイヤーへ", 0, S(292),
-                 S(286), S(224), S(16), 0);
+                 S(286), S(100), S(16), 0);
     make_control(hwnd, L"BUTTON", L"MP4書き出し",
                  BS_AUTOCHECKBOX | WS_TABSTOP, S(24), S(312), S(132), S(20),
                  kIdExportCheck);
-    make_control(hwnd, L"STATIC", L"ffmpeg.exe の場所", 0, S(160), S(312),
+    // ffmpeg path: label on first line, edit on second line
+    make_control(hwnd, L"STATIC", L"ffmpeg.exe の場所", 0, S(24), S(336),
                  S(140), S(16), 0);
     make_control(hwnd, L"EDIT", L"", ES_AUTOHSCROLL | WS_BORDER,
-                 S(304), S(310), S(224), S(22), kIdFfmpegEdit);
+                 S(168), S(334), S(228), S(22), kIdFfmpegEdit);
     make_control(hwnd, L"STATIC",
-                 L"ffmpeg.exe の場所が空欄の場合は PATH から探します。",
-                 0, S(24), S(336), S(492), S(16), 0);
+                 L"空欄の場合は PATH から探します。",
+                 0, S(24), S(360), S(372), S(16), 0);
     make_control(hwnd, L"BUTTON", L"生成後に自動で配置する",
-                 BS_AUTOCHECKBOX | WS_TABSTOP, S(24), S(360), S(220), S(20),
+                 BS_AUTOCHECKBOX | WS_TABSTOP, S(24), S(382), S(220), S(20),
                  kIdAutoPlaceCheck);
     CheckDlgButton(hwnd, kIdAutoPlaceCheck, BST_CHECKED);
     make_control(hwnd, L"BUTTON", L"コンソールを表示",
-                 BS_AUTOCHECKBOX | WS_TABSTOP, S(248), S(360), S(168), S(20),
+                 BS_AUTOCHECKBOX | WS_TABSTOP, S(248), S(382), S(156), S(20),
                  kIdConsoleCheck);
     make_control(hwnd, L"STATIC",
                  L"コンソールを表示：ffgac / ffedit / ffmpeg の処理ウィンドウを出します。",
-                 0, S(24), S(384), S(492), S(16), 0);
+                 0, S(24), S(406), S(372), S(16), 0);
 
-    // Steps, in order. The place button and the auto-place checkbox
-    // used to share the name "結果を自動配置" (design doc P2).
+    // Steps, in order.
     make_control(hwnd, L"BUTTON", L"1. カット点を検出", WS_TABSTOP, S(12),
-                 S(416), S(252), S(28), kIdDetectButton);
+                 S(436), S(192), S(28), kIdDetectButton);
     make_control(hwnd, L"BUTTON", L"2. 選択した区間を生成", WS_TABSTOP,
-                 S(272), S(416), S(256), S(28), kIdGenerateButton);
-    make_control(hwnd, L"BUTTON", L"生成を中止", WS_TABSTOP, S(12), S(452),
+                 S(216), S(436), S(192), S(28), kIdGenerateButton);
+    make_control(hwnd, L"BUTTON", L"生成を中止", WS_TABSTOP, S(12), S(472),
                  S(120), S(28), kIdCancelButton);
     EnableWindow(GetDlgItem(hwnd, kIdCancelButton), FALSE);
     make_control(hwnd, L"BUTTON", L"3. 選択した区間を配置する", WS_TABSTOP,
-                 S(140), S(452), S(220), S(28), kIdPlaceButton);
-    make_control(hwnd, L"BUTTON", L"キャッシュクリア", WS_TABSTOP, S(368),
-                 S(452), S(160), S(28), kIdClearCacheButton);
+                 S(140), S(472), S(176), S(28), kIdPlaceButton);
+    make_control(hwnd, L"BUTTON", L"キャッシュクリア", WS_TABSTOP, S(324),
+                 S(472), S(84), S(28), kIdClearCacheButton);
 
     // Progress: label + bar (PROGRESS_CLASS, design doc P3).
-    make_control(hwnd, L"STATIC", L"生成状況：待機中", 0, S(12), S(488),
-                 S(516), S(16), kIdProgressLabel);
-    HWND bar = make_control(hwnd, PROGRESS_CLASSW, L"", 0, S(12), S(508),
-                            S(516), S(16), kIdProgressBar);
+    make_control(hwnd, L"STATIC", L"生成状況：待機中", 0, S(12), S(508),
+                 S(396), S(16), kIdProgressLabel);
+    HWND bar = make_control(hwnd, PROGRESS_CLASSW, L"", 0, S(12), S(528),
+                            S(396), S(16), kIdProgressBar);
     SendMessageW(bar, PBM_SETRANGE, 0, MAKELPARAM(0, 100));
     SendMessageW(bar, PBM_SETPOS, 0, 0);
 
@@ -1026,13 +1114,16 @@ void build_controls(HWND hwnd) {
     make_control(hwnd, L"LISTBOX", L"",
                  LBS_EXTENDEDSEL | LBS_NOTIFY | WS_VSCROLL | WS_HSCROLL |
                      WS_BORDER,
-                 S(12), S(532), S(516), S(72), kIdSegmentList);
+                 S(12), S(552), S(396), S(72), kIdSegmentList);
+    make_control(hwnd, L"STATIC", L"選択中: なし", 0,
+                 S(12), S(628), S(396), S(18), kIdSummaryLabel);
     // No ES_AUTOHSCROLL, so long status text wraps onto the next
     // line instead of running past the right edge. Height 46 fits
     // about 2 lines at 9pt.
     make_control(hwnd, L"EDIT", L"対象レイヤーを指定して [1. カット点を検出] を押してください。",
                  ES_MULTILINE | ES_READONLY | WS_VSCROLL | WS_BORDER,
-                 S(12), S(612), S(516), S(46), kIdStatusEdit);
+                 S(12), S(648), S(396), S(46), kIdStatusEdit);
+    update_angle_control_visibility(hwnd);
 }
 
 LRESULT CALLBACK panel_wnd_proc(HWND hwnd, UINT msg, WPARAM wparam,
@@ -1043,12 +1134,20 @@ LRESULT CALLBACK panel_wnd_proc(HWND hwnd, UINT msg, WPARAM wparam,
             // The creation size is in 96-DPI design units; resize to
             // the scaled size so the layout keeps its proportions at
             // 125%/150% display scaling.
-            SetWindowPos(hwnd, nullptr, 0, 0, scale_px(540), scale_px(670),
+            SetWindowPos(hwnd, nullptr, 0, 0, scale_px(420), scale_px(704),
                          SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
             return 0;
         case WM_COMMAND: {
             const int id = LOWORD(wparam);
             const int code = HIWORD(wparam);
+            if (id == kIdSegmentList && code == LBN_SELCHANGE) {
+                update_selection_summary(hwnd);
+                return 0;
+            }
+            if (id == kIdPresetCombo && code == CBN_SELCHANGE) {
+                update_angle_control_visibility(hwnd);
+                return 0;
+            }
             if (code == BN_CLICKED) {
                 switch (id) {
                     case kIdDetectButton: on_detect(hwnd); return 0;
@@ -1123,7 +1222,7 @@ HWND create_panel_window(HOST_APP_TABLE* host, HINSTANCE instance) {
     Context& ctx = context();
     if (ctx.edit != nullptr) parent = ctx.edit->get_host_app_window();
     HWND hwnd = CreateWindowExW(0, L"SceneMoshPanel", L"SceneMosh",
-                                WS_CHILD | WS_VISIBLE, 0, 0, 540, 670, parent,
+                                WS_CHILD | WS_VISIBLE, 0, 0, 420, 704, parent,
                                 nullptr, instance, nullptr);
     if (hwnd == nullptr) {
         log_error(&sdk_logger(), "panel: could not create the window");

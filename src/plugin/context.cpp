@@ -78,9 +78,28 @@ std::filesystem::path default_tools_dir() {
     return app_data_dir() / L"scenemosh" / L"ffglitch";
 }
 
+void set_project_path(std::wstring_view path) {
+    std::lock_guard<std::mutex> lock(context().mutex);
+    context().project_path = std::wstring(path);
+}
+
+std::wstring get_project_path() {
+    std::lock_guard<std::mutex> lock(context().mutex);
+    return context().project_path;
+}
+
 std::filesystem::path resolve_cache_dir(std::wstring_view folder_item) {
-    if (folder_item.empty()) return default_cache_dir();
-    return std::filesystem::path(folder_item);
+    if (!folder_item.empty()) {
+        return std::filesystem::path(folder_item);
+    }
+    const std::wstring proj = get_project_path();
+    if (!proj.empty()) {
+        std::filesystem::path p(proj);
+        if (p.has_parent_path()) {
+            return p.parent_path() / L"scenemosh_cache";
+        }
+    }
+    return default_cache_dir();
 }
 
 bool confirm_ffglitch_download(HWND parent) {
@@ -216,19 +235,26 @@ void ensure_tools_and_submit(Job job, std::filesystem::path tools_dir) {
 }
 
 void clear_all_cache() {
-    const std::filesystem::path dir = default_cache_dir();
-    CacheIndex index(dir);
-    std::size_t removed = 0;
-    for (const CacheEntry& entry : index.list()) {
-        if (index.remove(entry)) ++removed;
+    std::vector<std::filesystem::path> dirs = {default_cache_dir()};
+    const std::filesystem::path proj_cache = resolve_cache_dir({});
+    if (proj_cache != dirs.front()) {
+        dirs.push_back(proj_cache);
     }
-    // Also drop half-written ".part" files, which list() does not report.
+    std::size_t removed = 0;
     std::error_code ec;
-    for (const auto& item : std::filesystem::directory_iterator(dir, ec)) {
-        const std::filesystem::path p = item.path();
-        if (p.extension() == L".mp4" &&
-            p.stem().extension() == L".part") {
-            if (std::filesystem::remove(p, ec)) ++removed;
+    for (const auto& dir : dirs) {
+        if (!std::filesystem::exists(dir, ec)) continue;
+        CacheIndex index(dir);
+        for (const CacheEntry& entry : index.list()) {
+            if (index.remove(entry)) ++removed;
+        }
+        // Also drop half-written ".part" files, which list() does not report.
+        for (const auto& item : std::filesystem::directory_iterator(dir, ec)) {
+            const std::filesystem::path p = item.path();
+            if (p.extension() == L".mp4" &&
+                p.stem().extension() == L".part") {
+                if (std::filesystem::remove(p, ec)) ++removed;
+            }
         }
     }
     log_info(&sdk_logger(), format_string("cache cleared: %zu file(s) removed",

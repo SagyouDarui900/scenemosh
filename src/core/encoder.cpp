@@ -108,7 +108,7 @@ EncodeResult apply_glitch(const std::filesystem::path& src_path,
             result.error = "cannot write script file: " + script_path.string();
             return result;
         }
-        script << generate_preset_js(settings.preset, settings.strength, settings.seed);
+        script << generate_preset_js(settings);
     }
     const std::vector<std::string> args = build_ffedit_args(
         preset_feature(settings.preset), script_path, src_path, output_part);

@@ -35,6 +35,7 @@
 
 #include "cache_index.hpp"
 #include "context.hpp"
+#include "frame_fit.hpp"
 #include "hash.hpp"
 #include "items.hpp"
 #include "marker_cache.hpp"
@@ -136,26 +137,24 @@ bool apply_cache_frame(FILTER_PROC_VIDEO* video,
     const int height = image.height;
     if (width <= 0 || height <= 0 || image.buffer == nullptr) return false;
 
+    std::vector<PIXEL_RGBA> rgba_buffer;
+    const PIXEL_RGBA* src_rgba = nullptr;
+
     if (image.format == INPUT_PIXEL_FORMAT::RGBA) {
         if (image.pitch == width * 4) {
-            video->set_image_data(
-                static_cast<const PIXEL_RGBA*>(image.buffer), width, height);
+            src_rgba = static_cast<const PIXEL_RGBA*>(image.buffer);
         } else {
-            std::vector<PIXEL_RGBA> rows(
-                static_cast<std::size_t>(width) * height);
+            rgba_buffer.resize(static_cast<std::size_t>(width) * height);
             const auto* src = static_cast<const std::uint8_t*>(image.buffer);
             for (int y = 0; y < height; ++y) {
-                std::memcpy(rows.data() + static_cast<std::size_t>(y) * width,
+                std::memcpy(rgba_buffer.data() + static_cast<std::size_t>(y) * width,
                             src + static_cast<std::size_t>(y) * image.pitch,
                             static_cast<std::size_t>(width) * 4);
             }
-            video->set_image_data(rows.data(), width, height);
+            src_rgba = rgba_buffer.data();
         }
-        return true;
-    }
-    if (image.format == INPUT_PIXEL_FORMAT::BGRA) {
-        std::vector<PIXEL_RGBA> rows(
-            static_cast<std::size_t>(width) * height);
+    } else if (image.format == INPUT_PIXEL_FORMAT::BGRA) {
+        rgba_buffer.resize(static_cast<std::size_t>(width) * height);
         const auto* src = static_cast<const std::uint8_t*>(image.buffer);
         for (int y = 0; y < height; ++y) {
             const std::uint8_t* row =
@@ -166,21 +165,45 @@ bool apply_cache_frame(FILTER_PROC_VIDEO* video,
                 px.g = row[x * 4 + 1];
                 px.r = row[x * 4 + 2];
                 px.a = row[x * 4 + 3];
-                rows[static_cast<std::size_t>(y) * width + x] = px;
+                rgba_buffer[static_cast<std::size_t>(y) * width + x] = px;
             }
         }
-        video->set_image_data(rows.data(), width, height);
-        return true;
+        src_rgba = rgba_buffer.data();
+    } else {
+        // PA64 / HF64 / YUY2 / YC48: the host decoded the cache MP4 into a
+        // format this build does not convert. Log once and fall through
+        // to the marker.
+        static std::once_flag warned;
+        std::call_once(warned, [] {
+            log_warning(&sdk_logger(),
+                        "cache frame format is not RGBA/BGRA; cannot display it");
+        });
+        return false;
     }
-    // PA64 / HF64 / YUY2 / YC48: the host decoded the cache MP4 into a
-    // format this build does not convert. Log once and fall through
-    // to the marker.
-    static std::once_flag warned;
-    std::call_once(warned, [] {
-        log_warning(&sdk_logger(),
-                    "cache frame format is not RGBA/BGRA; cannot display it");
-    });
-    return false;
+
+    if (src_rgba == nullptr) return false;
+
+    const int target_w = (video->scene != nullptr && video->scene->width > 0)
+                             ? video->scene->width
+                             : width;
+    const int target_h = (video->scene != nullptr && video->scene->height > 0)
+                             ? video->scene->height
+                             : height;
+
+    if (width == target_w && height == target_h) {
+        video->set_image_data(src_rgba, width, height);
+    } else {
+        std::vector<PIXEL_RGBA> scaled(static_cast<std::size_t>(target_w) * target_h);
+        std::span<const std::uint8_t> src_bytes(
+            reinterpret_cast<const std::uint8_t*>(src_rgba),
+            static_cast<std::size_t>(width) * height * 4);
+        std::span<std::uint8_t> dst_bytes(
+            reinterpret_cast<std::uint8_t*>(scaled.data()),
+            static_cast<std::size_t>(target_w) * target_h * 4);
+        fit_frame_bilinear(src_bytes, width, height, dst_bytes, target_w, target_h);
+        video->set_image_data(scaled.data(), target_w, target_h);
+    }
+    return true;
 }
 
 } // namespace

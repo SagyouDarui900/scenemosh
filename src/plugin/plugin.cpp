@@ -37,6 +37,15 @@ void on_clear_cache(EDIT_SECTION* /*edit*/) {
     clear_all_cache();
 }
 
+void on_project_update(PROJECT_FILE* project) {
+    if (project != nullptr && project->get_project_file_path != nullptr) {
+        LPCWSTR path = project->get_project_file_path();
+        set_project_path(path ? path : L"");
+    } else {
+        set_project_path(L"");
+    }
+}
+
 } // namespace hybrid::plugin
 
 using namespace hybrid::plugin;
@@ -68,6 +77,12 @@ EXTERN_C __declspec(dllexport) void RegisterPlugin(HOST_APP_TABLE* host) {
     init_context(host);
     host->register_filter_plugin(&filter_plugin_table);
     host->register_clear_cache_handler(&on_clear_cache);
+    if (host->register_project_load_handler != nullptr) {
+        host->register_project_load_handler(&on_project_update);
+    }
+    if (host->register_project_save_handler != nullptr) {
+        host->register_project_save_handler(&on_project_update);
+    }
     // The panel is optional: if its window cannot be created, the
     // media object still works.
     create_panel_window(host, g_hinstance);

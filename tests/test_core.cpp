@@ -206,15 +206,39 @@ TEST_CASE("presets: M4 strength mappings and per-mode JS") {
     CHECK(p == PresetId::Zoom);
     CHECK(preset_from_index(16, p));
     CHECK(p == PresetId::Sink);
+    CHECK(preset_from_index(17, p));
+    CHECK(p == PresetId::Fluid);
+    CHECK(preset_from_index(18, p));
+    CHECK(p == PresetId::Ripple);
+    CHECK(preset_from_index(19, p));
+    CHECK(p == PresetId::Gravity);
+    CHECK(preset_from_index(20, p));
+    CHECK(p == PresetId::Transfer);
     CHECK(!preset_from_index(-1, p));
     CHECK(!preset_from_index(kPresetCount, p));
-    CHECK(kPresetCount == 17);
+    CHECK(kPresetCount == 21);
 
     CHECK(std::string(preset_display_name(PresetId::Zoom)) == "ズーム");
     CHECK(std::string(preset_display_name(PresetId::Sink)) == "シンク");
+    CHECK(std::string(preset_display_name(PresetId::Fluid)) == "流体");
+    CHECK(std::string(preset_display_name(PresetId::Ripple)) == "波紋");
+    CHECK(std::string(preset_display_name(PresetId::Gravity)) == "重力");
+    CHECK(std::string(preset_display_name(PresetId::Transfer)) == "モーション転送");
     CHECK(std::string(preset_id_name(PresetId::Shuffle)) == "shuffle");
+    CHECK(std::string(preset_id_name(PresetId::Fluid)) == "fluid");
+    CHECK(std::string(preset_id_name(PresetId::Ripple)) == "ripple");
+    CHECK(std::string(preset_id_name(PresetId::Gravity)) == "gravity");
+    CHECK(std::string(preset_id_name(PresetId::Transfer)) == "transfer");
     CHECK(preset_from_id_name("vibrate", p));
     CHECK(p == PresetId::Vibrate);
+    CHECK(preset_from_id_name("fluid", p));
+    CHECK(p == PresetId::Fluid);
+    CHECK(preset_from_id_name("ripple", p));
+    CHECK(p == PresetId::Ripple);
+    CHECK(preset_from_id_name("gravity", p));
+    CHECK(p == PresetId::Gravity);
+    CHECK(preset_from_id_name("transfer", p));
+    CHECK(p == PresetId::Transfer);
     CHECK(!preset_from_id_name("glide", p)); // not in the first batch
 
     // Strength mappings (C++ helpers; the JS generator uses them).
@@ -241,6 +265,15 @@ TEST_CASE("presets: M4 strength mappings and per-mode JS") {
     CHECK(stop_factor(0) == doctest::Approx(1.0));
     CHECK(stop_factor(50) == doctest::Approx(0.5));
     CHECK(stop_factor(100) == doctest::Approx(0.0));
+    CHECK(fluid_window_frames(0) == 2);
+    CHECK(fluid_window_frames(50) == 9);
+    CHECK(fluid_window_frames(100) == 16);
+    CHECK(ripple_amplitude(0) == doctest::Approx(1.0));
+    CHECK(ripple_amplitude(100) == doctest::Approx(12.0));
+    CHECK(ripple_frequency(0) == doctest::Approx(0.15));
+    CHECK(ripple_frequency(100) == doctest::Approx(0.50));
+    CHECK(gravity_acceleration(0) == doctest::Approx(0.2));
+    CHECK(gravity_acceleration(100) == doctest::Approx(2.0));
 
     // Each M4 mode's JS carries its own distinctive code.
     const auto has = [](PresetId preset, const std::string& needle) {
@@ -258,9 +291,51 @@ TEST_CASE("presets: M4 strength mappings and per-mode JS") {
     CHECK(has(PresetId::Buffer, "mv_queue.length > 8"));
     CHECK(has(PresetId::Delay, "mv_queue.length > 15"));
     CHECK(has(PresetId::Stop, "stf"));
-    CHECK(has(PresetId::Sink, "skoff"));
+    CHECK(has(PresetId::Sink, "sk_v"));
+    CHECK(has(PresetId::Fluid, "mv_queue.length > 9"));
+    CHECK(has(PresetId::Fluid, "sum_h / count"));
+    CHECK(has(PresetId::Ripple, "rfreq + rphase"));
+    CHECK(has(PresetId::Gravity, "gravity_vel = Math.min(gravity_vel +"));
+    CHECK(has(PresetId::Gravity, "g_thresh"));
     // The delay queue state exists in every script (harmless when unused).
     CHECK(has(PresetId::Amplify, "var mv_queue = []"));
+
+    // Angle parameter tests for directional presets
+    CHECK(preset_supports_angle(PresetId::Fixed));
+    CHECK(preset_supports_angle(PresetId::DriftDelta));
+    CHECK(preset_supports_angle(PresetId::Shift));
+    CHECK(preset_supports_angle(PresetId::Gravity));
+    CHECK(preset_supports_angle(PresetId::Sink));
+    CHECK(preset_supports_angle(PresetId::Ripple));
+    CHECK(preset_supports_angle(PresetId::Transfer));
+    CHECK(!preset_supports_angle(PresetId::Amplify));
+    CHECK(!preset_supports_angle(PresetId::Zoom));
+
+    // Transfer preset in cut-centred mode:
+    // Frames before cut are pushed to mv_queue.
+    // Frames at and after cut replay from mv_queue.
+    const std::string js_trans_cut = generate_preset_js(PresetId::Transfer, 50, 0, 0, 30, 60);
+    CHECK(js_trans_cut.find("var cut = 30;") != std::string::npos);
+    CHECK(js_trans_cut.find("mv_queue.push(mvs.dup())") != std::string::npos);
+    CHECK(js_trans_cut.find("src_k = (frame_index - cut) % mv_queue.length") != std::string::npos);
+
+    // Fixed preset with 90 degrees angle: vectors should point straight down (fh=0, fv>0)
+    const std::string js_fixed_90 = generate_preset_js(PresetId::Fixed, 50, 0, 90);
+    CHECK(js_fixed_90.find("var fh = 0;") != std::string::npos);
+    CHECK(js_fixed_90.find("var fv = 16;") != std::string::npos);
+
+    // Datamosh preset with cut_offset (cut-centred mode):
+    // Before the cut, frames pass through and update saved_grid.
+    // At and after the cut, saved_grid is applied.
+    const std::string js_mosh_cut = generate_preset_js(PresetId::Datamosh, 50, 0, 0, 30, 60);
+    CHECK(js_mosh_cut.find("var cut = 30;") != std::string::npos);
+    CHECK(js_mosh_cut.find("frame_index < cut") != std::string::npos);
+    CHECK(js_mosh_cut.find("saved_grid = mvs.dup()") != std::string::npos);
+
+    // Other presets with cut_offset: pass through cleanly before cut
+    const std::string js_amp_cut = generate_preset_js(PresetId::Amplify, 50, 0, 0, 30, 60);
+    CHECK(js_amp_cut.find("var cut = 30;") != std::string::npos);
+    CHECK(js_amp_cut.find("frame_index < cut") != std::string::npos);
 }
 
 TEST_CASE("cut_detector: cut-centred segments") {

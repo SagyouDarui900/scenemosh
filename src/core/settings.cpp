@@ -39,6 +39,10 @@ const char* preset_display_name(PresetId preset) noexcept {
     case PresetId::Delay: return "ディレイ";
     case PresetId::Stop: return "ストップ";
     case PresetId::Sink: return "シンク";
+    case PresetId::Fluid: return "流体";
+    case PresetId::Ripple: return "波紋";
+    case PresetId::Gravity: return "重力";
+    case PresetId::Transfer: return "モーション転送";
     }
     return "MV増幅";
 }
@@ -62,6 +66,10 @@ const char* preset_id_name(PresetId preset) noexcept {
     case PresetId::Delay: return "delay";
     case PresetId::Stop: return "stop";
     case PresetId::Sink: return "sink";
+    case PresetId::Fluid: return "fluid";
+    case PresetId::Ripple: return "ripple";
+    case PresetId::Gravity: return "gravity";
+    case PresetId::Transfer: return "transfer";
     }
     return "amplify";
 }
@@ -84,6 +92,10 @@ bool preset_from_id_name(std::string_view name, PresetId& out) noexcept {
     if (name == "delay") { out = PresetId::Delay; return true; }
     if (name == "stop") { out = PresetId::Stop; return true; }
     if (name == "sink") { out = PresetId::Sink; return true; }
+    if (name == "fluid") { out = PresetId::Fluid; return true; }
+    if (name == "ripple") { out = PresetId::Ripple; return true; }
+    if (name == "gravity") { out = PresetId::Gravity; return true; }
+    if (name == "transfer") { out = PresetId::Transfer; return true; }
     return false;
 }
 
@@ -97,6 +109,21 @@ const char* preset_feature(PresetId preset) noexcept {
     switch (preset) {
     case PresetId::DriftDelta: return "mv_delta";
     default: return "mv";
+    }
+}
+
+bool preset_supports_angle(PresetId preset) noexcept {
+    switch (preset) {
+    case PresetId::Fixed:
+    case PresetId::DriftDelta:
+    case PresetId::Shift:
+    case PresetId::Gravity:
+    case PresetId::Sink:
+    case PresetId::Ripple:
+    case PresetId::Transfer:
+        return true;
+    default:
+        return false;
     }
 }
 
@@ -116,6 +143,7 @@ bool uid_is_safe(const std::string& uid) {
 
 bool Settings::normalize() {
     strength = std::clamp(strength, 0, 100);
+    angle = (angle % 360 + 360) % 360;
     crf = std::clamp(crf, 0, 51);
     width = std::max(width, 1);
     height = std::max(height, 1);

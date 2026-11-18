@@ -45,9 +45,13 @@ enum class PresetId {
     Delay,      // ディレイ (M4)
     Stop,       // ストップ (M4)
     Sink,       // シンク (M4)
+    Fluid,      // 流体
+    Ripple,     // 波紋
+    Gravity,    // 重力
+    Transfer,   // モーション転送
 };
 
-inline constexpr int kPresetCount = 17;
+inline constexpr int kPresetCount = 21;
 
 // Japanese display name, e.g. "MV増幅".
 const char* preset_display_name(PresetId preset) noexcept;
@@ -58,6 +62,8 @@ bool preset_from_id_name(std::string_view name, PresetId& out) noexcept;
 bool preset_from_index(int index, PresetId& out) noexcept;
 // ffedit feature this preset needs: "mv" or "mv_delta".
 const char* preset_feature(PresetId preset) noexcept;
+// Whether this preset supports a directional angle (0..360 deg).
+bool preset_supports_angle(PresetId preset) noexcept;
 
 // Inclusive frame interval [start_frame, end_frame].
 struct Interval {
@@ -83,6 +89,7 @@ struct Settings {
     PresetId preset = PresetId::Amplify;
     int strength = 50; // 0..100, clamped by normalize()
     std::uint32_t seed = 0;
+    int angle = 0;     // 0..360 degrees, normalized by normalize()
     // Suppress I-frames in the source encode so every frame is a P-frame.
     bool suppress_iframe = true;
 
@@ -94,6 +101,9 @@ struct Settings {
     int fps_den = 1001;
 
     Interval interval;
+    // Frame offset within the interval where the cut boundary occurs (0-based).
+    // -1 means no cut point (e.g. object-based generation).
+    std::int64_t cut_offset = -1;
 
     // Optional libx264 MP4 export (design doc section 10). Off by default.
     bool export_mp4 = false;

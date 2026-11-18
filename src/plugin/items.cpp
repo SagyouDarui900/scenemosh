@@ -47,6 +47,10 @@ FILTER_ITEM_SELECT::ITEM preset_list[] = {
     {L"ディレイ", 14},
     {L"ストップ", 15},
     {L"シンク", 16},
+    {L"流体", 17},
+    {L"波紋", 18},
+    {L"重力", 19},
+    {L"モーション転送", 20},
     {nullptr, 0}};
 FILTER_ITEM_GROUP group_cache{L"キャッシュ"};
 FILTER_ITEM_GROUP group_end{L""};
@@ -60,11 +64,12 @@ FILTER_ITEM_TRACK frame_offset_item{L"フレームオフセット", 0, -600, 600
 // section 25): the generation reads the previous clip's frames
 // before the object's start, so the motion vectors cross the cut.
 // Both default to 30; 0 means no lead-in / lead-out.
-FILTER_ITEM_TRACK before_frames_item{L"繋ぎ目前", 30, 0, 600};
-FILTER_ITEM_TRACK after_frames_item{L"繋ぎ目後", 30, 0, 600};
+FILTER_ITEM_TRACK before_frames_item{L"繋ぎ目前(f)", 30, 0, 600};
+FILTER_ITEM_TRACK after_frames_item{L"繋ぎ目後(f)", 30, 0, 600};
 FILTER_ITEM_SELECT preset_item{L"プリセット", 0, preset_list};
 FILTER_ITEM_TRACK strength_item{L"強度", 50, 0, 100};
 FILTER_ITEM_TRACK seed_item{L"seed", 0, 0, 100000};
+FILTER_ITEM_TRACK angle_item{L"角度", 0, 0, 360, 1.0};
 FILTER_ITEM_CHECK suppress_iframe_item{L"Iフレーム抑制", true};
 FILTER_ITEM_FOLDER cache_folder_item{L"キャッシュフォルダ", L""};
 FILTER_ITEM_CHECK export_mp4_item{L"MP4書き出し", false};
@@ -96,6 +101,7 @@ void* filter_items[] = {
     &preset_item,
     &strength_item,
     &seed_item,
+    &angle_item,
     &suppress_iframe_item,
     &group_cache,
     &cache_folder_item,
@@ -192,6 +198,7 @@ Settings build_settings(const EDIT_INFO& info, const OBJECT_INFO& object,
     s.preset = static_cast<PresetId>(preset_item.value);
     s.strength = static_cast<int>(strength_item.value);
     s.seed = static_cast<std::uint32_t>(seed_item.value);
+    s.angle = static_cast<int>(angle_item.value);
     s.suppress_iframe = suppress_iframe_item.value;
     s.export_mp4 = export_mp4_item.value;
     s.cache_dir = std::move(cache_dir);
@@ -200,6 +207,8 @@ Settings build_settings(const EDIT_INFO& info, const OBJECT_INFO& object,
     s.fps_num = info.rate;
     s.fps_den = info.scale;
     s.interval = media_object_interval(object);
+    const std::int64_t before = media_before_frames();
+    s.cut_offset = (before > 0) ? before : -1;
     s.normalize();
     return s;
 }
@@ -314,15 +323,24 @@ void submit_generation(EDIT_SECTION* edit, bool glitch_only) {
         }
     }
 
+    const std::int64_t count = settings.interval.frame_count();
+    log_info(&sdk_logger(),
+             format_string("generation: frames %lld..%lld (%lld frames)",
+                           static_cast<long long>(settings.interval.start_frame),
+                           static_cast<long long>(settings.interval.end_frame),
+                           static_cast<long long>(count)));
     std::shared_ptr<IFrameProvider> provider;
     if (!glitch_only) {
-        const std::int64_t count = settings.interval.frame_count();
         if (settings.ref_mode == RefMode::Layer) {
             provider = std::make_shared<LayerSourceReader>(
                 ctx.edit, ref_layer,
                 settings.interval.start_frame + settings.frame_offset, count,
                 settings.width, settings.height, &sdk_logger());
         } else {
+            log_warning(&sdk_logger(),
+                        "generation: 画面キャプチャモードを使用します。"
+                        "AviUtl2 本体の仕様によりプレビュー位置のフレームが固定出力される場合があります。"
+                        "意図しない結果になる場合はレイヤー参照モードを使用してください。");
             provider = std::make_shared<ScreenSourceReader>(
                 ctx.edit,
                 settings.interval.start_frame + settings.frame_offset, count,

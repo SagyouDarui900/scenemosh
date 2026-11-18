@@ -64,6 +64,8 @@ std::string compute_glitch_hash(const Settings& settings,
     h.mix_name(preset_id_name(settings.preset));
     h.mix_i64(settings.strength);
     h.mix_u32(settings.seed);
+    h.mix_i64(settings.angle);
+    h.mix_i64(settings.cut_offset);
     h.mix_bool(settings.suppress_iframe);
     h.mix_string(ffedit_version);
     h.mix_i64(generation);
