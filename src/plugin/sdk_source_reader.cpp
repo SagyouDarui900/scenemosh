@@ -6,12 +6,27 @@
 
 #include <chrono>
 #include <cstring>
+#include <mutex>
+#include <unordered_set>
 
 #include "frame_fit.hpp"
 
 namespace hybrid::plugin {
 
 namespace {
+
+std::mutex g_pending_mutex;
+std::unordered_set<void*> g_pending_params;
+
+void register_pending(void* param) {
+    std::lock_guard<std::mutex> lock(g_pending_mutex);
+    g_pending_params.insert(param);
+}
+
+bool take_pending(void* param) {
+    std::lock_guard<std::mutex> lock(g_pending_mutex);
+    return g_pending_params.erase(param) > 0;
+}
 
 // Fill an RGBA buffer with opaque black.
 void fill_black(std::span<std::uint8_t> rgba) {
@@ -35,6 +50,10 @@ constexpr std::chrono::seconds kScreenTimeout{5};
 void on_rendering_done(void* param, int /*frame*/, const void* buffer,
                        int width, int height, int pitch) {
     if (param == nullptr) return;
+    if (!take_pending(param)) {
+        // Double-call guard: this param was already handled or is invalid.
+        return;
+    }
     // Take ownership of the holder; the shared state itself stays alive
     // through the waiter's copy even if we run after its timeout.
     const std::unique_ptr<std::shared_ptr<RenderRequest>> holder(
@@ -151,10 +170,12 @@ bool request_layer_render(EDIT_HANDLE* edit, OBJECT_HANDLE object,
                           ILogger* logger) {
     auto state = std::make_shared<RenderRequest>();
     auto* holder = new std::shared_ptr<RenderRequest>(state);
+    register_pending(holder);
     const bool requested = edit->rendering_object_video(
         object, scene_frame, /*apply_effect=*/true, holder,
         &on_rendering_done);
     if (!requested) {
+        take_pending(holder);
         delete holder;
         log_error(logger, "layer render: rendering request rejected");
         return false;
@@ -266,9 +287,11 @@ bool ScreenSourceReader::read_frame(std::int64_t index,
 
     auto state = std::make_shared<RenderRequest>();
     auto* holder = new std::shared_ptr<RenderRequest>(state);
+    register_pending(holder);
     const bool requested = edit_->rendering_scene_video(
         scene_frame, holder, &on_rendering_done);
     if (!requested) {
+        take_pending(holder);
         delete holder;
         log_error(logger_, "screen render: rendering request rejected");
         return false;

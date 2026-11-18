@@ -150,9 +150,6 @@ bool apply_cache_frame(FILTER_PROC_VIDEO* video,
         return false;
     }
 
-    log_info(&sdk_logger(), format_string("apply_cache: frame=%d, fmt=%d, %dx%d, pitch=%d",
-                                          local_frame, static_cast<int>(image.format), width, height, image.pitch));
-
     std::vector<PIXEL_RGBA> rgba_buffer;
     const PIXEL_RGBA* src_rgba = nullptr;
 
@@ -241,7 +238,6 @@ bool apply_cache_frame(FILTER_PROC_VIDEO* video,
         fit_frame_bilinear(src_bytes, width, height, dst_bytes, target_w, target_h);
         video->set_image_data(scaled.data(), target_w, target_h);
     }
-    log_info(&sdk_logger(), "apply_cache: set_image_data called successfully");
     return true;
 }
 

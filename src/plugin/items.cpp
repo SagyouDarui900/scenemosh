@@ -397,22 +397,46 @@ void submit_generation(EDIT_SECTION* edit, bool glitch_only) {
 
 void delete_cache_for_uid(const std::string& uid,
                           const std::filesystem::path& cache_dir) {
-    CacheIndex index(cache_dir);
+    std::vector<std::filesystem::path> dirs = {default_cache_dir()};
+    if (cache_dir != dirs.front()) dirs.push_back(cache_dir);
+
     std::size_t removed = 0;
-    for (const CacheEntry& entry : index.list()) {
-        if (entry.uid == uid && index.remove(entry)) ++removed;
-    }
-    // Also sweep any leftovers starting with "<uid>-" (such as .part files or unregistered files)
-    std::error_code ec;
-    const std::string prefix = uid + "-";
-    for (const auto& item : std::filesystem::directory_iterator(cache_dir, ec)) {
-        const std::string name = item.path().filename().string();
-        if (name.rfind(prefix, 0) == 0) {
-            if (std::filesystem::remove(item.path(), ec)) ++removed;
+    std::size_t locked = 0;
+
+    for (const auto& dir : dirs) {
+        std::error_code ec;
+        if (!std::filesystem::exists(dir, ec)) continue;
+        CacheIndex index(dir);
+        for (const CacheEntry& entry : index.list()) {
+            if (entry.uid == uid) {
+                if (std::filesystem::remove(entry.path, ec)) {
+                    ++removed;
+                } else if (ec) {
+                    ++locked;
+                }
+            }
+        }
+        // Also sweep any leftovers starting with "<uid>-" (such as .part files or unregistered files)
+        const std::string prefix = uid + "-";
+        for (const auto& item : std::filesystem::directory_iterator(dir, ec)) {
+            const std::string name = item.path().filename().string();
+            if (name.rfind(prefix, 0) == 0) {
+                if (std::filesystem::remove(item.path(), ec)) {
+                    ++removed;
+                } else if (ec) {
+                    ++locked;
+                }
+            }
         }
     }
-    log_info(&sdk_logger(), format_string("deleted %zu cache file(s) for %s",
-                                          removed, uid.c_str()));
+
+    if (locked > 0) {
+        log_warning(&sdk_logger(), format_string("deleted %zu cache file(s) for %s (%zu file(s) in use by AviUtl2)",
+                                                 removed, uid.c_str(), locked));
+    } else {
+        log_info(&sdk_logger(), format_string("deleted %zu cache file(s) for %s",
+                                              removed, uid.c_str()));
+    }
 }
 
 } // namespace
@@ -428,14 +452,47 @@ void on_glitch_only_button(EDIT_SECTION* edit) {
 void on_delete_cache_button(EDIT_SECTION* edit) {
     OBJECT_HANDLE object = button_object(edit);
     if (object == nullptr) {
-        log_error(&sdk_logger(), "delete cache: no SceneMosh object selected");
+        log_error(&sdk_logger(), "delete cache: no object selected");
         return;
     }
+    std::string uid;
     EFFECT_HANDLE effect = edit->find_effect(object, L"SceneMosh");
-    const std::string uid = read_uid(
-        edit, object, effect,
-        static_cast<std::int64_t>(
-            reinterpret_cast<std::uintptr_t>(object)));
+    if (effect != nullptr) {
+        uid = read_uid(
+            edit, object, effect,
+            static_cast<std::int64_t>(
+                reinterpret_cast<std::uintptr_t>(object)));
+    } else {
+        // Check if this is a video object referencing a cache file
+        LPCSTR alias = edit->get_object_alias(object);
+        if (alias != nullptr) {
+            std::string alias_str(alias);
+            // Search for panel- or ffglitch-
+            for (const std::string prefix : {"panel-", "ffglitch-"}) {
+                std::size_t pos = alias_str.find(prefix);
+                if (pos != std::string::npos) {
+                    // Extract uid from filename: format is <uid>-<srcHash>-...
+                    // Check characters until we hit the 16-hex hash
+                    std::size_t dot_mp4 = alias_str.find(".mp4", pos);
+                    if (dot_mp4 != std::string::npos) {
+                        std::string full_name = alias_str.substr(pos, dot_mp4 - pos);
+                        auto parsed = parse_cache_filename(full_name + ".mp4");
+                        if (parsed.has_value()) {
+                            uid = parsed->uid;
+                            break;
+                        }
+                    }
+                }
+                if (!uid.empty()) break;
+            }
+        }
+    }
+
+    if (uid.empty()) {
+        log_error(&sdk_logger(), "delete cache: no SceneMosh or cache media object selected");
+        return;
+    }
+
     const std::filesystem::path cache_dir =
         resolve_cache_dir(cache_folder_item.value == nullptr
                               ? std::wstring_view{}
@@ -444,12 +501,15 @@ void on_delete_cache_button(EDIT_SECTION* edit) {
 }
 
 void on_delete_unused_button(EDIT_SECTION* edit) {
-    const std::filesystem::path cache_dir = resolve_cache_dir(
+    std::vector<std::filesystem::path> dirs = {default_cache_dir()};
+    const std::filesystem::path proj_cache = resolve_cache_dir(
         cache_folder_item.value == nullptr
             ? std::wstring_view{}
             : std::wstring_view(cache_folder_item.value));
+    if (proj_cache != dirs.front()) dirs.push_back(proj_cache);
 
     std::unordered_set<std::string> active_uids;
+    std::string timeline_aliases;
     bool timeline_scanned = false;
     if (edit != nullptr && edit->info != nullptr) {
         timeline_scanned = true;
@@ -471,46 +531,83 @@ void on_delete_unused_button(EDIT_SECTION* edit) {
                         active_uids.insert(std::string(data.uid));
                     }
                 }
+                // Check if the object references a cache file (e.g. video object placed by the panel)
+                LPCSTR alias = edit->get_object_alias(object);
+                if (alias != nullptr && alias[0] != '\0') {
+                    timeline_aliases += alias;
+                    timeline_aliases += "\n";
+                }
                 if (lf.end < frame) break;
                 frame = lf.end + 1;
             }
         }
     }
 
-    CacheIndex index(cache_dir);
-    const std::vector<CacheEntry> entries = index.list();
     std::size_t removed = 0;
+    std::size_t locked = 0;
 
-    for (const CacheEntry& entry : entries) {
-        bool should_remove = false;
-        if (timeline_scanned && active_uids.find(entry.uid) == active_uids.end()) {
-            // Object is no longer present on the timeline
-            should_remove = true;
-        } else if (!entry.is_src) {
-            // Glitch cache without source video is invalid
-            const std::filesystem::path src =
-                index.src_path(entry.uid, entry.src_hash);
-            std::error_code ec;
-            if (!std::filesystem::exists(src, ec)) {
+    for (const auto& cache_dir : dirs) {
+        std::error_code ec;
+        if (!std::filesystem::exists(cache_dir, ec)) continue;
+
+        CacheIndex index(cache_dir);
+        const std::vector<CacheEntry> entries = index.list();
+
+        for (const CacheEntry& entry : entries) {
+            bool is_directly_used = false;
+            const std::string filename = entry.path.filename().string();
+            if (!timeline_aliases.empty() &&
+                timeline_aliases.find(filename) != std::string::npos) {
+                // Placed clip on timeline directly referencing this MP4
+                is_directly_used = true;
+            } else if (active_uids.find(entry.uid) != active_uids.end()) {
+                // SceneMosh media object on timeline uses this uid
+                is_directly_used = true;
+            }
+
+            bool should_remove = false;
+            if (timeline_scanned && !is_directly_used) {
+                // Not referenced on the timeline
                 should_remove = true;
+            } else if (!entry.is_src) {
+                // Glitch cache without source video is invalid
+                const std::filesystem::path src =
+                    index.src_path(entry.uid, entry.src_hash);
+                if (!std::filesystem::exists(src, ec)) {
+                    should_remove = true;
+                }
+            }
+            if (should_remove) {
+                if (std::filesystem::remove(entry.path, ec)) {
+                    ++removed;
+                } else if (ec) {
+                    ++locked;
+                }
             }
         }
-        if (should_remove && index.remove(entry)) {
-            ++removed;
+
+        // Clean up orphan .part files
+        for (const auto& item :
+             std::filesystem::directory_iterator(cache_dir, ec)) {
+            const std::filesystem::path p = item.path();
+            if (p.extension() == L".mp4" && p.stem().extension() == L".part") {
+                if (std::filesystem::remove(p, ec)) {
+                    ++removed;
+                } else if (ec) {
+                    ++locked;
+                }
+            }
         }
     }
 
-    // Always clean up orphan .part files
-    std::error_code ec;
-    for (const auto& item :
-         std::filesystem::directory_iterator(cache_dir, ec)) {
-        const std::filesystem::path p = item.path();
-        if (p.extension() == L".mp4" && p.stem().extension() == L".part") {
-            if (std::filesystem::remove(p, ec)) ++removed;
-        }
+    if (locked > 0) {
+        log_warning(&sdk_logger(),
+                    format_string("deleted %zu unused cache file(s) (%zu in use by AviUtl2)",
+                                  removed, locked));
+    } else {
+        log_info(&sdk_logger(),
+                 format_string("deleted %zu unused cache file(s)", removed));
     }
-    log_info(&sdk_logger(),
-             format_string("deleted %zu unused cache file(s)", removed));
 }
 
 } // namespace hybrid::plugin

@@ -105,9 +105,13 @@ void cancel_generator();
 // thread never blocks on a ~40MB download.
 void ensure_tools_and_submit(Job job, std::filesystem::path tools_dir);
 
-// Delete every file in the default cache folder whose name parses as a
-// hybrid cache file. Called from the host's clear-cache handler.
-void clear_all_cache();
+// Delete every file in the default and project cache folders.
+// Returns the number of removed files and locked files (in use by AviUtl2).
+struct ClearCacheResult {
+    std::size_t removed = 0;
+    std::size_t locked = 0;
+};
+ClearCacheResult clear_all_cache();
 
 // Remember that this layer contained a framebuffer object.
 void remember_rejected_layer(int layer);

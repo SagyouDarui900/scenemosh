@@ -1,10 +1,9 @@
-// timeline_placer.cpp — see timeline_placer.hpp.
-
-#include "timeline_placer.hpp"
-
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
+
+#include "timeline_placer.hpp"
+
 #include <windows.h>
 
 #include <algorithm>

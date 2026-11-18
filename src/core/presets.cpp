@@ -208,7 +208,7 @@ std::string generate_preset_js(PresetId preset, int strength, std::uint32_t seed
         if (a == 0 && seed != 0) {
             fixed_vector(seed, fh, fv);
         } else {
-            const double mag = 8.0 + (static_cast<double>(s) * 16.0 / 100.0);
+            const double mag = (static_cast<double>(s) * 24.0 / 100.0);
             fh = static_cast<int>(std::round(mag * cos_a));
             fv = static_cast<int>(std::round(mag * sin_a));
         }
@@ -228,12 +228,12 @@ std::string generate_preset_js(PresetId preset, int strength, std::uint32_t seed
     }
     case PresetId::Datamosh: {
         // Classic datamosh:
-        // In cut-centred mode (cut_offset >= 0), pass through all frames BEFORE
+        // In cut-centred mode (cut_offset > 0), pass through all frames BEFORE
         // the cut so the lead-in is clean and unglitched, while updating saved_grid.
         // At the cut (frame_index >= cut_offset), reuse the cut-point motion vectors
         // so the previous scene smears forward into the next scene.
-        // In object-based mode (cut_offset < 0), hold based on strength.
-        if (cut_offset >= 0) {
+        // When cut_offset <= 0 (object mode or cut at very start), hold based on strength.
+        if (cut_offset > 0) {
             js << "  var cut = " << cut_offset << ";\n"
                   "  if (frame_index < cut) {\n"
                   "    saved_grid = mvs.dup();\n"
@@ -503,13 +503,14 @@ std::string generate_preset_js(PresetId preset, int strength, std::uint32_t seed
         // Strength scales vector magnitude (0% = 0, 100% = original magnitude).
         // Angle rotates the transferred vectors if non-zero.
         const double f = static_cast<double>(s) / 100.0;
-        if (cut_offset >= 0) {
+        if (cut_offset > 0) {
             js << "  var cut = " << cut_offset << ";\n"
                   "  var f = " << fmt3(f) << ";\n"
                   "  var rcos = " << fmt3(cos_a) << ";\n"
                   "  var rsin = " << fmt3(sin_a) << ";\n"
                   "  var use_angle = " << (a != 0 ? "true" : "false") << ";\n"
                   "  if (frame_index < cut) {\n"
+                  "    if (mv_queue.length >= 120) mv_queue.shift();\n"
                   "    mv_queue.push(mvs.dup());\n"
                   "  } else {\n"
                   "    if (mv_queue.length > 0) {\n"
@@ -539,6 +540,7 @@ std::string generate_preset_js(PresetId preset, int strength, std::uint32_t seed
                   "  var rsin = " << fmt3(sin_a) << ";\n"
                   "  var use_angle = " << (a != 0 ? "true" : "false") << ";\n"
                   "  if (frame_index <= hold) {\n"
+                  "    if (mv_queue.length >= 120) mv_queue.shift();\n"
                   "    mv_queue.push(mvs.dup());\n"
                   "  } else {\n"
                   "    if (mv_queue.length > 0) {\n"

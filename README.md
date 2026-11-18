@@ -170,7 +170,7 @@ cmake -S . -B build -G "Visual Studio 17 2022" -A x64
 cmake --build build --config Release
 ```
 
-ビルド完了後、`build/Release/scenemosh.aux2` が生成されます。また、`build/Release/test_core.exe` で単体テスト（28テスト・557アサーション）を実行できます。
+ビルド完了後、`build/Release/scenemosh.aux2` が生成されます。また、`build/Release/test_core.exe` で単体テスト（30テスト・580アサーション）を実行できます。
 
 ---
 

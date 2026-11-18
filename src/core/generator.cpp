@@ -55,10 +55,10 @@ void Generator::submit(Job job) {
 }
 
 void Generator::cancel() {
-    cancel_ = true;
     std::queue<Job> dropped;
     {
         std::lock_guard<std::mutex> lock(mutex_);
+        cancel_ = true;
         queue_.swap(dropped);
     }
     cv_.notify_all();
@@ -101,8 +101,19 @@ void Generator::worker_loop() {
             job = std::move(queue_.front());
             queue_.pop();
             running_ = true;
+            if (cancel_) {
+                running_ = false;
+                cv_.notify_all();
+                if (job.finished) {
+                    JobResult r;
+                    r.cancelled = true;
+                    r.error = "cancelled before start";
+                    job.finished(r);
+                }
+                continue;
+            }
+            cancel_ = false;
         }
-        cancel_ = false;
         JobResult result = run_job(job);
         if (job.finished) job.finished(result);
         {

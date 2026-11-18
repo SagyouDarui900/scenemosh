@@ -874,8 +874,19 @@ void on_place(HWND parent) {
 }
 
 void on_clear_cache(HWND parent) {
-    clear_all_cache();
-    set_status(parent, L"キャッシュを削除しました。");
+    const ClearCacheResult res = clear_all_cache();
+    if (res.locked > 0) {
+        const std::wstring msg =
+            L"キャッシュを削除しました（" + std::to_wstring(res.removed) +
+            L"件削除、" + std::to_wstring(res.locked) +
+            L"件はAviUtl2で使用中のため保持）。";
+        set_status(parent, msg);
+    } else {
+        const std::wstring msg =
+            L"キャッシュを削除しました（" + std::to_wstring(res.removed) +
+            L"件削除）。";
+        set_status(parent, msg);
+    }
 }
 
 void on_job_done(HWND parent, WPARAM wparam) {
@@ -1024,7 +1035,7 @@ void build_controls(HWND hwnd) {
                        : kIdModeCutRadio,
                    BST_CHECKED);
     make_control(hwnd, L"STATIC",
-                 L"繋ぎ目の前後何フレームを取り込むか (合計=前+後)。範囲選択時は選択範囲のみ走査。",
+                 L"繋ぎ目の前後フレームを取り込みます（範囲選択時は選択範囲内）。",
                  0, S(24), S(124), S(372), S(16), 0);
 
     // 2. 生成する内容
@@ -1060,11 +1071,11 @@ void build_controls(HWND hwnd) {
     make_control(hwnd, L"BUTTON", L"3. 配置と出力", BS_GROUPBOX, S(12),
                  S(264), S(396), S(160), 0);
     make_control(hwnd, L"STATIC", L"配置先レイヤー", 0, S(24), S(286),
-                 S(180), S(16), 0);
+                 S(100), S(16), 0);
     make_control(hwnd, L"EDIT", L"0", ES_NUMBER | ES_AUTOHSCROLL | WS_BORDER,
-                 S(212), S(284), S(72), S(22), kIdFallbackEdit);
-    make_control(hwnd, L"STATIC", L"0=自動：上の空きレイヤーへ", 0, S(292),
-                 S(286), S(100), S(16), 0);
+                 S(128), S(284), S(52), S(22), kIdFallbackEdit);
+    make_control(hwnd, L"STATIC", L"0=自動：上の空きレイヤーへ", 0, S(188),
+                 S(286), S(200), S(16), 0);
     make_control(hwnd, L"BUTTON", L"MP4書き出し",
                  BS_AUTOCHECKBOX | WS_TABSTOP, S(24), S(312), S(132), S(20),
                  kIdExportCheck);
@@ -1084,7 +1095,7 @@ void build_controls(HWND hwnd) {
                  BS_AUTOCHECKBOX | WS_TABSTOP, S(248), S(382), S(156), S(20),
                  kIdConsoleCheck);
     make_control(hwnd, L"STATIC",
-                 L"コンソールを表示：ffgac / ffedit / ffmpeg の処理ウィンドウを出します。",
+                 L"※ffgac / ffedit / ffmpeg の処理ウィンドウを表示",
                  0, S(24), S(406), S(372), S(16), 0);
 
     // Steps, in order.

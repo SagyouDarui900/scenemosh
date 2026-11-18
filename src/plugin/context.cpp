@@ -234,30 +234,36 @@ void ensure_tools_and_submit(Job job, std::filesystem::path tools_dir) {
     }).detach();
 }
 
-void clear_all_cache() {
+ClearCacheResult clear_all_cache() {
     std::vector<std::filesystem::path> dirs = {default_cache_dir()};
     const std::filesystem::path proj_cache = resolve_cache_dir({});
     if (proj_cache != dirs.front()) {
         dirs.push_back(proj_cache);
     }
-    std::size_t removed = 0;
+    ClearCacheResult res;
     std::error_code ec;
     for (const auto& dir : dirs) {
         if (!std::filesystem::exists(dir, ec)) continue;
-        CacheIndex index(dir);
-        for (const CacheEntry& entry : index.list()) {
-            if (index.remove(entry)) ++removed;
-        }
-        // Sweep all remaining .mp4 and .part files in the cache folder directly
         for (const auto& item : std::filesystem::directory_iterator(dir, ec)) {
             const std::filesystem::path p = item.path();
-            if (p.extension() == L".mp4") {
-                if (std::filesystem::remove(p, ec)) ++removed;
+            if (p.extension() == L".mp4" || p.extension() == L".part" ||
+                p.stem().extension() == L".part") {
+                if (std::filesystem::remove(p, ec)) {
+                    ++res.removed;
+                } else if (ec) {
+                    ++res.locked;
+                }
             }
         }
     }
-    log_info(&sdk_logger(), format_string("cache cleared: %zu file(s) removed",
-                                          removed));
+    if (res.locked > 0) {
+        log_warning(&sdk_logger(), format_string("cache cleared: %zu file(s) removed (%zu file(s) in use by AviUtl2)",
+                                                 res.removed, res.locked));
+    } else {
+        log_info(&sdk_logger(), format_string("cache cleared: %zu file(s) removed",
+                                              res.removed));
+    }
+    return res;
 }
 
 void remember_rejected_layer(int layer) {

@@ -320,9 +320,10 @@ TEST_CASE("presets: M4 strength mappings and per-mode JS") {
     CHECK(js_trans_cut.find("src_k = (frame_index - cut) % mv_queue.length") != std::string::npos);
 
     // Fixed preset with 90 degrees angle: vectors should point straight down (fh=0, fv>0)
+    // Strength 50 -> mag = 50 * 24 / 100 = 12
     const std::string js_fixed_90 = generate_preset_js(PresetId::Fixed, 50, 0, 90);
     CHECK(js_fixed_90.find("var fh = 0;") != std::string::npos);
-    CHECK(js_fixed_90.find("var fv = 16;") != std::string::npos);
+    CHECK(js_fixed_90.find("var fv = 12;") != std::string::npos);
 
     // Datamosh preset with cut_offset (cut-centred mode):
     // Before the cut, frames pass through and update saved_grid.
@@ -949,6 +950,54 @@ TEST_CASE("generator: tool versions are detected once per tool paths (F1)") {
     fs::remove_all(cache, ec);
 }
 #endif
+
+TEST_CASE("settings: angle normalization for supported vs unsupported presets") {
+    Settings s;
+    s.uid = "test-uid";
+    s.cache_dir = "C:/dummy/cache";
+    s.interval.start_frame = 0;
+    s.interval.end_frame = 100;
+
+    // Amplify does not support angle -> should normalize to 0
+    s.preset = PresetId::Amplify;
+    s.angle = 90;
+    s.normalize();
+    CHECK(s.angle == 0);
+
+    // Fixed supports angle -> should keep normalized angle
+    s.preset = PresetId::Fixed;
+    s.angle = 450;
+    s.normalize();
+    CHECK(s.angle == 90);
+
+    // Transfer supports angle
+    s.preset = PresetId::Transfer;
+    s.angle = 180;
+    s.normalize();
+    CHECK(s.angle == 180);
+
+    // Datamosh does not support angle -> 0
+    s.preset = PresetId::Datamosh;
+    s.angle = 180;
+    s.normalize();
+    CHECK(s.angle == 0);
+}
+
+TEST_CASE("presets: cut_offset 0 fallback and transfer queue bounds") {
+    // When cut_offset == 0 (no lead-in frames), Datamosh should fall back to hold mode
+    const std::string js_mosh_zero = generate_preset_js(PresetId::Datamosh, 50, 0, 0, 0, 60);
+    CHECK(js_mosh_zero.find("var hold =") != std::string::npos);
+    CHECK(js_mosh_zero.find("var cut =") == std::string::npos);
+
+    // When cut_offset == 0, Transfer should also fall back to hold mode
+    const std::string js_trans_zero = generate_preset_js(PresetId::Transfer, 50, 0, 0, 0, 60);
+    CHECK(js_trans_zero.find("var hold =") != std::string::npos);
+    CHECK(js_trans_zero.find("var cut =") == std::string::npos);
+
+    // When cut_offset > 0, Transfer has mv_queue upper bound
+    const std::string js_trans_cut = generate_preset_js(PresetId::Transfer, 50, 0, 0, 30, 60);
+    CHECK(js_trans_cut.find("if (mv_queue.length >= 120) mv_queue.shift();") != std::string::npos);
+}
 
 TEST_CASE("integration: encode + ffedit for every preset") {
     const auto tools = integration_tools();

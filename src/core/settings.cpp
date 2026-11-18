@@ -143,7 +143,11 @@ bool uid_is_safe(const std::string& uid) {
 
 bool Settings::normalize() {
     strength = std::clamp(strength, 0, 100);
-    angle = (angle % 360 + 360) % 360;
+    if (preset_supports_angle(preset)) {
+        angle = (angle % 360 + 360) % 360;
+    } else {
+        angle = 0;
+    }
     crf = std::clamp(crf, 0, 51);
     width = std::max(width, 1);
     height = std::max(height, 1);
