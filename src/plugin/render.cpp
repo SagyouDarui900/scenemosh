@@ -1,0 +1,255 @@
+// render.cpp — func_proc_video for the SceneMosh media object.
+//
+// Per frame, in order:
+//   1. Make sure the instance has a uid (FILTER_ITEM_DATA, written
+//      in place; see items.hpp).
+//   2. Passthrough mode: copy the referenced layer's image into this
+//      object and return.
+//   3. Look for the newest finished glitch cache file (generations
+//      0..7) for the current settings. When found, fetch the frame
+//      through CACHE_HANDLE::get_video_file_cache and set it as this
+//      object's image.
+//   4. Otherwise, when enabled, draw the "not generated" marker.
+//      When disabled, leave the object empty.
+//
+// Deviation from design doc section 4: the cache frame is applied
+// with FILTER_PROC_VIDEO::set_image_data, not
+// set_image_resource_data("object", ...). set_image_data is the
+// operation the SDK sample uses to replace an object's image, and
+// its contract is explicit in filter2.h; whether writing the
+// "object" resource also updates the displayed image is not
+// documented. If set_image_data turns out to be wrong on a real
+// machine, switching to set_image_resource_data is a one-line change
+// in apply_cache_frame().
+//
+// The host may call this from its render thread, not the UI thread;
+// no UI is touched here, only the cache handle and the log.
+
+#include <windows.h>
+
+#include <cstring>
+#include <memory>
+#include <vector>
+
+#include "sdk.hpp"
+
+#include "cache_index.hpp"
+#include "context.hpp"
+#include "hash.hpp"
+#include "items.hpp"
+#include "marker_cache.hpp"
+#include "sdk_logger.hpp"
+#include "settings.hpp"
+#include "util.hpp"
+
+namespace hybrid::plugin {
+namespace {
+
+// Dark checkerboard with a magenta border, generated per frame size.
+// No text is drawn: drawing text would need a font and a rasteriser.
+std::vector<PIXEL_RGBA> make_marker_buffer(int width, int height) {
+    std::vector<PIXEL_RGBA> buffer(static_cast<std::size_t>(width) * height);
+    for (int y = 0; y < height; ++y) {
+        for (int x = 0; x < width; ++x) {
+            const bool checker = ((x / 16) + (y / 16)) % 2 == 0;
+            PIXEL_RGBA px{};
+            if (x < 4 || y < 4 || x >= width - 4 || y >= height - 4) {
+                px.r = 255; px.g = 0; px.b = 255; px.a = 255; // magenta
+            } else if (checker) {
+                px.r = 48; px.g = 48; px.b = 48; px.a = 255;
+            } else {
+                px.r = 24; px.g = 24; px.b = 24; px.a = 255;
+            }
+            buffer[static_cast<std::size_t>(y) * width + x] = px;
+        }
+    }
+    return buffer;
+}
+
+// One marker buffer per size, reused across preview frames (F2).
+// The buffer was rebuilt on every frame (~5 ms at 1920x1080)
+// although the picture is the same while the size is unchanged.
+MarkerCache<PIXEL_RGBA>& marker_cache() {
+    static MarkerCache<PIXEL_RGBA> cache;
+    return cache;
+}
+
+// Snapshot the current item values. The interval comes from the
+// object itself (scene-relative frames); fps and size from the scene.
+Settings render_settings(const SCENE_INFO& scene, const OBJECT_INFO& object,
+                         const std::string& uid,
+                         const std::filesystem::path& cache_dir) {
+    Settings s;
+    s.uid = uid;
+    s.ref_mode = ref_mode_item.value == 1 ? RefMode::Screen : RefMode::Layer;
+    s.ref_layer = static_cast<int>(ref_layer_item.value) - 1;
+    s.frame_offset = static_cast<std::int64_t>(frame_offset_item.value);
+    s.preset = static_cast<PresetId>(preset_item.value);
+    s.strength = static_cast<int>(strength_item.value);
+    s.seed = static_cast<std::uint32_t>(seed_item.value);
+    s.suppress_iframe = suppress_iframe_item.value;
+    s.cache_dir = cache_dir;
+    s.width = scene.width;
+    s.height = scene.height;
+    s.fps_num = scene.rate;
+    s.fps_den = scene.scale;
+    s.interval = media_object_interval(object);
+    s.normalize();
+    return s;
+}
+
+// First finished glitch cache file for these settings, generations
+// 0..7. Empty when nothing was generated yet.
+std::filesystem::path find_glitch_file(const Settings& settings) {
+    Context& ctx = context();
+    std::string ffgac_version;
+    std::string ffedit_version;
+    {
+        std::lock_guard<std::mutex> lock(ctx.mutex);
+        ffgac_version = ctx.ffgac_version;
+        ffedit_version = ctx.ffedit_version;
+    }
+    const std::string src_hash = compute_src_hash(settings, ffgac_version);
+    CacheIndex index(settings.cache_dir);
+    for (int gen = 0; gen < kMaxGeneration; ++gen) {
+        // The generation is part of the file name; recompute per gen.
+        const std::string hash =
+            compute_glitch_hash(settings, ffedit_version, gen);
+        const std::filesystem::path p =
+            index.glitch_path(settings.uid, src_hash, hash, gen);
+        std::error_code ec;
+        if (std::filesystem::exists(p, ec)) return p;
+    }
+    return {};
+}
+
+// Fetch one frame from a cache MP4 and set it as the object image.
+// Returns false when the frame could not be fetched or converted.
+bool apply_cache_frame(FILTER_PROC_VIDEO* video,
+                       const std::filesystem::path& file, int local_frame) {
+    Context& ctx = context();
+    if (ctx.cache == nullptr) return false;
+    CACHE_FILE_IMAGE image = ctx.cache->get_video_file_cache(
+        file.wstring().c_str(), 0, local_frame);
+    if (!image) return false;
+    const int width = image.width;
+    const int height = image.height;
+    if (width <= 0 || height <= 0 || image.buffer == nullptr) return false;
+
+    if (image.format == INPUT_PIXEL_FORMAT::RGBA) {
+        if (image.pitch == width * 4) {
+            video->set_image_data(
+                static_cast<const PIXEL_RGBA*>(image.buffer), width, height);
+        } else {
+            std::vector<PIXEL_RGBA> rows(
+                static_cast<std::size_t>(width) * height);
+            const auto* src = static_cast<const std::uint8_t*>(image.buffer);
+            for (int y = 0; y < height; ++y) {
+                std::memcpy(rows.data() + static_cast<std::size_t>(y) * width,
+                            src + static_cast<std::size_t>(y) * image.pitch,
+                            static_cast<std::size_t>(width) * 4);
+            }
+            video->set_image_data(rows.data(), width, height);
+        }
+        return true;
+    }
+    if (image.format == INPUT_PIXEL_FORMAT::BGRA) {
+        std::vector<PIXEL_RGBA> rows(
+            static_cast<std::size_t>(width) * height);
+        const auto* src = static_cast<const std::uint8_t*>(image.buffer);
+        for (int y = 0; y < height; ++y) {
+            const std::uint8_t* row =
+                src + static_cast<std::size_t>(y) * image.pitch;
+            for (int x = 0; x < width; ++x) {
+                PIXEL_RGBA px{};
+                px.b = row[x * 4 + 0];
+                px.g = row[x * 4 + 1];
+                px.r = row[x * 4 + 2];
+                px.a = row[x * 4 + 3];
+                rows[static_cast<std::size_t>(y) * width + x] = px;
+            }
+        }
+        video->set_image_data(rows.data(), width, height);
+        return true;
+    }
+    // PA64 / HF64 / YUY2 / YC48: the host decoded the cache MP4 into a
+    // format this build does not convert. Log once and fall through
+    // to the marker.
+    static std::once_flag warned;
+    std::call_once(warned, [] {
+        log_warning(&sdk_logger(),
+                    "cache frame format is not RGBA/BGRA; cannot display it");
+    });
+    return false;
+}
+
+} // namespace
+
+bool func_proc_video(FILTER_PROC_VIDEO* video) {
+    if (video == nullptr || video->scene == nullptr ||
+        video->object == nullptr) {
+        return false;
+    }
+    const SCENE_INFO& scene = *video->scene;
+    const OBJECT_INFO& object = *video->object;
+    if (scene.width <= 0 || scene.height <= 0) return false;
+
+    // Instance uid: create once, then it persists with the project.
+    InstanceData* data = instance_data_item.value;
+    std::string uid;
+    if (data != nullptr) {
+        if (data->uid[0] == '\0') {
+            const std::string fresh = make_uid(object.effect_id);
+            const std::size_t to_copy =
+                std::min(fresh.size(), sizeof(data->uid) - 1);
+            std::memcpy(data->uid, fresh.data(), to_copy);
+            data->uid[to_copy] = '\0';
+        }
+        uid = data->uid;
+    }
+    if (uid.empty()) uid = make_uid(object.effect_id);
+
+    const std::filesystem::path cache_dir =
+        resolve_cache_dir(cache_folder_item.value == nullptr
+                              ? std::wstring_view{}
+                              : std::wstring_view(cache_folder_item.value));
+
+    // Passthrough: show the referenced layer's image unchanged.
+    if (passthrough_item.value) {
+        const std::wstring layer_resource =
+            L"layer:" + std::to_wstring(
+                            static_cast<int>(ref_layer_item.value) - 1);
+        if (video->copy_image_resource(L"object", layer_resource.c_str())) {
+            return true;
+        }
+        log_warning(&sdk_logger(), "passthrough: layer image not available");
+    }
+
+    const Settings settings =
+        render_settings(scene, object, uid, cache_dir);
+    const std::filesystem::path glitch_file = find_glitch_file(settings);
+    // The cache video starts before_frames frames ahead of the
+    // object (the lead-in), so the object's local frame 0 is cache
+    // frame before_frames; without the offset the video would play
+    // shifted by the lead-in.
+    if (!glitch_file.empty() &&
+        apply_cache_frame(video, glitch_file,
+                          object.frame +
+                              static_cast<int>(media_before_frames()))) {
+        return true;
+    }
+
+    if (show_marker_item.value) {
+        const int width = object.width > 0 ? object.width : scene.width;
+        const int height = object.height > 0 ? object.height : scene.height;
+        // The shared_ptr keeps the cached pixels alive while
+        // set_image_data uses them, even if another render thread
+        // rebuilds the cache for a different size in between.
+        const std::shared_ptr<const std::vector<PIXEL_RGBA>> marker =
+            marker_cache().get(width, height, make_marker_buffer);
+        video->set_image_data(marker->data(), width, height);
+    }
+    return true;
+}
+
+} // namespace hybrid::plugin
