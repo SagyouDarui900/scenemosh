@@ -49,6 +49,7 @@ extern FILTER_ITEM_TRACK after_frames_item;    // lead-out frames, 0..600
 extern FILTER_ITEM_SELECT preset_item;         // 0..16, see settings.hpp
 extern FILTER_ITEM_TRACK strength_item;        // 0..100
 extern FILTER_ITEM_TRACK seed_item;            // 0..100000
+extern FILTER_ITEM_TRACK angle_item;           // 0..360
 extern FILTER_ITEM_CHECK suppress_iframe_item;
 extern FILTER_ITEM_FOLDER cache_folder_item;   // empty = default folder
 extern FILTER_ITEM_CHECK export_mp4_item;      // libx264 MP4 export (off)

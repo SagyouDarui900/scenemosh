@@ -88,6 +88,7 @@ Settings render_settings(const SCENE_INFO& scene, const OBJECT_INFO& object,
     s.preset = static_cast<PresetId>(preset_item.value);
     s.strength = static_cast<int>(strength_item.value);
     s.seed = static_cast<std::uint32_t>(seed_item.value);
+    s.angle = static_cast<int>(angle_item.value);
     s.suppress_iframe = suppress_iframe_item.value;
     s.cache_dir = cache_dir;
     s.width = scene.width;
@@ -95,6 +96,8 @@ Settings render_settings(const SCENE_INFO& scene, const OBJECT_INFO& object,
     s.fps_num = scene.rate;
     s.fps_den = scene.scale;
     s.interval = media_object_interval(object);
+    const std::int64_t before = media_before_frames();
+    s.cut_offset = (before > 0) ? before : -1;
     s.normalize();
     return s;
 }
@@ -129,13 +132,26 @@ std::filesystem::path find_glitch_file(const Settings& settings) {
 bool apply_cache_frame(FILTER_PROC_VIDEO* video,
                        const std::filesystem::path& file, int local_frame) {
     Context& ctx = context();
-    if (ctx.cache == nullptr) return false;
+    if (ctx.cache == nullptr) {
+        log_error(&sdk_logger(), "apply_cache: ctx.cache is null");
+        return false;
+    }
     CACHE_FILE_IMAGE image = ctx.cache->get_video_file_cache(
         file.wstring().c_str(), 0, local_frame);
-    if (!image) return false;
+    if (!image) {
+        log_error(&sdk_logger(), format_string("apply_cache: get_video_file_cache returned null for frame %d of %s",
+                                              local_frame, file.filename().string().c_str()));
+        return false;
+    }
     const int width = image.width;
     const int height = image.height;
-    if (width <= 0 || height <= 0 || image.buffer == nullptr) return false;
+    if (width <= 0 || height <= 0 || image.buffer == nullptr) {
+        log_error(&sdk_logger(), format_string("apply_cache: invalid image dimensions %dx%d or null buffer", width, height));
+        return false;
+    }
+
+    log_info(&sdk_logger(), format_string("apply_cache: frame=%d, fmt=%d, %dx%d, pitch=%d",
+                                          local_frame, static_cast<int>(image.format), width, height, image.pitch));
 
     std::vector<PIXEL_RGBA> rgba_buffer;
     const PIXEL_RGBA* src_rgba = nullptr;
@@ -153,7 +169,8 @@ bool apply_cache_frame(FILTER_PROC_VIDEO* video,
             }
             src_rgba = rgba_buffer.data();
         }
-    } else if (image.format == INPUT_PIXEL_FORMAT::BGRA) {
+    } else if (image.format == INPUT_PIXEL_FORMAT::BGRA ||
+               image.format == INPUT_PIXEL_FORMAT::BGR) {
         rgba_buffer.resize(static_cast<std::size_t>(width) * height);
         const auto* src = static_cast<const std::uint8_t*>(image.buffer);
         for (int y = 0; y < height; ++y) {
@@ -164,20 +181,41 @@ bool apply_cache_frame(FILTER_PROC_VIDEO* video,
                 px.b = row[x * 4 + 0];
                 px.g = row[x * 4 + 1];
                 px.r = row[x * 4 + 2];
-                px.a = row[x * 4 + 3];
+                px.a = (image.format == INPUT_PIXEL_FORMAT::BGRA) ? row[x * 4 + 3] : 255;
                 rgba_buffer[static_cast<std::size_t>(y) * width + x] = px;
             }
         }
         src_rgba = rgba_buffer.data();
+    } else if (image.format == INPUT_PIXEL_FORMAT::YUY2) {
+        rgba_buffer.resize(static_cast<std::size_t>(width) * height);
+        const auto* src = static_cast<const std::uint8_t*>(image.buffer);
+        for (int y = 0; y < height; ++y) {
+            const std::uint8_t* row = src + static_cast<std::size_t>(y) * image.pitch;
+            for (int x = 0; x < width; x += 2) {
+                int y0 = row[x * 2 + 0];
+                int u  = row[x * 2 + 1] - 128;
+                int y1 = row[x * 2 + 2];
+                int v  = row[x * 2 + 3] - 128;
+                auto yuv2rgb = [](int Y, int U, int V) -> PIXEL_RGBA {
+                    PIXEL_RGBA p{};
+                    int r = Y + (91881 * V) / 65536;
+                    int g = Y - (22554 * U + 46802 * V) / 65536;
+                    int b = Y + (116130 * U) / 65536;
+                    p.r = static_cast<std::uint8_t>(std::clamp(r, 0, 255));
+                    p.g = static_cast<std::uint8_t>(std::clamp(g, 0, 255));
+                    p.b = static_cast<std::uint8_t>(std::clamp(b, 0, 255));
+                    p.a = 255;
+                    return p;
+                };
+                rgba_buffer[static_cast<std::size_t>(y) * width + x + 0] = yuv2rgb(y0, u, v);
+                if (x + 1 < width) {
+                    rgba_buffer[static_cast<std::size_t>(y) * width + x + 1] = yuv2rgb(y1, u, v);
+                }
+            }
+        }
+        src_rgba = rgba_buffer.data();
     } else {
-        // PA64 / HF64 / YUY2 / YC48: the host decoded the cache MP4 into a
-        // format this build does not convert. Log once and fall through
-        // to the marker.
-        static std::once_flag warned;
-        std::call_once(warned, [] {
-            log_warning(&sdk_logger(),
-                        "cache frame format is not RGBA/BGRA; cannot display it");
-        });
+        log_error(&sdk_logger(), format_string("apply_cache: unsupported format %d", static_cast<int>(image.format)));
         return false;
     }
 
@@ -203,6 +241,7 @@ bool apply_cache_frame(FILTER_PROC_VIDEO* video,
         fit_frame_bilinear(src_bytes, width, height, dst_bytes, target_w, target_h);
         video->set_image_data(scaled.data(), target_w, target_h);
     }
+    log_info(&sdk_logger(), "apply_cache: set_image_data called successfully");
     return true;
 }
 
@@ -251,15 +290,31 @@ bool func_proc_video(FILTER_PROC_VIDEO* video) {
     const Settings settings =
         render_settings(scene, object, uid, cache_dir);
     const std::filesystem::path glitch_file = find_glitch_file(settings);
-    // The cache video starts before_frames frames ahead of the
-    // object (the lead-in), so the object's local frame 0 is cache
-    // frame before_frames; without the offset the video would play
-    // shifted by the lead-in.
-    if (!glitch_file.empty() &&
-        apply_cache_frame(video, glitch_file,
-                          object.frame +
-                              static_cast<int>(media_before_frames()))) {
-        return true;
+
+    if (glitch_file.empty()) {
+        static thread_local int miss_count = 0;
+        if (++miss_count <= 2) {
+            Context& ctx = context();
+            std::string ffgac_v, ffedit_v;
+            {
+                std::lock_guard<std::mutex> lock(ctx.mutex);
+                ffgac_v = ctx.ffgac_version;
+                ffedit_v = ctx.ffedit_version;
+            }
+            const std::string src_h = compute_src_hash(settings, ffgac_v);
+            const std::string gli_h = compute_glitch_hash(settings, ffedit_v, 0);
+            log_warning(&sdk_logger(), format_string("render: glitch file not found for uid=%s, src_h=%s, gli_h=%s, interval=[%lld..%lld], cut_offset=%lld, angle=%d, strength=%d",
+                                                     uid.c_str(), src_h.c_str(), gli_h.c_str(),
+                                                     static_cast<long long>(settings.interval.start_frame),
+                                                     static_cast<long long>(settings.interval.end_frame),
+                                                     static_cast<long long>(settings.cut_offset),
+                                                     settings.angle, settings.strength));
+        }
+    } else {
+        const int cache_frame = object.frame + static_cast<int>(media_before_frames());
+        if (apply_cache_frame(video, glitch_file, cache_frame)) {
+            return true;
+        }
     }
 
     if (show_marker_item.value) {

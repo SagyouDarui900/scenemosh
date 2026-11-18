@@ -248,11 +248,10 @@ void clear_all_cache() {
         for (const CacheEntry& entry : index.list()) {
             if (index.remove(entry)) ++removed;
         }
-        // Also drop half-written ".part" files, which list() does not report.
+        // Sweep all remaining .mp4 and .part files in the cache folder directly
         for (const auto& item : std::filesystem::directory_iterator(dir, ec)) {
             const std::filesystem::path p = item.path();
-            if (p.extension() == L".mp4" &&
-                p.stem().extension() == L".part") {
+            if (p.extension() == L".mp4") {
                 if (std::filesystem::remove(p, ec)) ++removed;
             }
         }

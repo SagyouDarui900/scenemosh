@@ -629,6 +629,31 @@ TEST_CASE("cache_index: names, part paths, parsing") {
     REQUIRE(exp_entry.has_value());
     CHECK(exp_entry->is_export);
     CHECK(exp_entry->glitch_hash == "fedcba9876543210");
+
+    // Hyphenated uid test cases (realistic real-machine uids)
+    const auto hyphen_glitch = parse_cache_filename(
+        fs::path("/tmp/cache") / "ffglitch-5c0-0001-3381d35722f29059-144496988831bd9b-g1.mp4");
+    REQUIRE(hyphen_glitch.has_value());
+    CHECK(hyphen_glitch->uid == "ffglitch-5c0-0001");
+    CHECK(hyphen_glitch->src_hash == "3381d35722f29059");
+    CHECK(hyphen_glitch->glitch_hash == "144496988831bd9b");
+    CHECK(hyphen_glitch->generation == 1);
+
+    const auto panel_glitch = parse_cache_filename(
+        fs::path("/tmp/cache") / "panel-s3-l1-500-560-03901ccdcaea9ce8-459749d44af368b9.mp4");
+    REQUIRE(panel_glitch.has_value());
+    CHECK(panel_glitch->uid == "panel-s3-l1-500-560");
+    CHECK(panel_glitch->src_hash == "03901ccdcaea9ce8");
+    CHECK(panel_glitch->glitch_hash == "459749d44af368b9");
+    CHECK(panel_glitch->generation == 0);
+
+    const auto hyphen_src = parse_cache_filename(
+        fs::path("/tmp/cache") / "ffglitch-5c0-0001-3381d35722f29059.src.mp4");
+    REQUIRE(hyphen_src.has_value());
+    CHECK(hyphen_src->uid == "ffglitch-5c0-0001");
+    CHECK(hyphen_src->is_src);
+    CHECK(hyphen_src->src_hash == "3381d35722f29059");
+
     CHECK(!parse_cache_filename(fs::path("/tmp/cache") / "random.mp4").has_value());
     CHECK(!parse_cache_filename(fs::path("/tmp/cache") / "u1-nothex.mp4").has_value());
 }

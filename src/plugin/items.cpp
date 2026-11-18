@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cstring>
+#include <unordered_set>
 
 #include "cache_index.hpp"
 #include "context.hpp"
@@ -401,6 +402,15 @@ void delete_cache_for_uid(const std::string& uid,
     for (const CacheEntry& entry : index.list()) {
         if (entry.uid == uid && index.remove(entry)) ++removed;
     }
+    // Also sweep any leftovers starting with "<uid>-" (such as .part files or unregistered files)
+    std::error_code ec;
+    const std::string prefix = uid + "-";
+    for (const auto& item : std::filesystem::directory_iterator(cache_dir, ec)) {
+        const std::string name = item.path().filename().string();
+        if (name.rfind(prefix, 0) == 0) {
+            if (std::filesystem::remove(item.path(), ec)) ++removed;
+        }
+    }
     log_info(&sdk_logger(), format_string("deleted %zu cache file(s) for %s",
                                           removed, uid.c_str()));
 }
@@ -433,26 +443,64 @@ void on_delete_cache_button(EDIT_SECTION* edit) {
     delete_cache_for_uid(uid, cache_dir);
 }
 
-void on_delete_unused_button(EDIT_SECTION* /*edit*/) {
-    // Only entries whose source file is gone are safe to delete without
-    // knowing which uids are still live in other objects. ".part"
-    // leftovers from interrupted jobs are deleted as well.
+void on_delete_unused_button(EDIT_SECTION* edit) {
     const std::filesystem::path cache_dir = resolve_cache_dir(
         cache_folder_item.value == nullptr
             ? std::wstring_view{}
             : std::wstring_view(cache_folder_item.value));
+
+    std::unordered_set<std::string> active_uids;
+    bool timeline_scanned = false;
+    if (edit != nullptr && edit->info != nullptr) {
+        timeline_scanned = true;
+        const int max_layer = std::max(0, edit->info->layer_max);
+        for (int layer = 0; layer <= max_layer; ++layer) {
+            int frame = 0;
+            int walked = 0;
+            while (walked < 10000) {
+                ++walked;
+                OBJECT_HANDLE object = edit->find_object(layer, frame);
+                if (object == nullptr) break;
+                const OBJECT_LAYER_FRAME lf = edit->get_object_layer_frame(object);
+                EFFECT_HANDLE effect = edit->find_effect(object, L"SceneMosh");
+                if (effect != nullptr) {
+                    InstanceData data{};
+                    const int got = edit->get_effect_data_value(
+                        effect, L"データ", &data, sizeof(data));
+                    if (got == sizeof(data) && data.uid[0] != '\0') {
+                        active_uids.insert(std::string(data.uid));
+                    }
+                }
+                if (lf.end < frame) break;
+                frame = lf.end + 1;
+            }
+        }
+    }
+
     CacheIndex index(cache_dir);
     const std::vector<CacheEntry> entries = index.list();
     std::size_t removed = 0;
+
     for (const CacheEntry& entry : entries) {
-        if (entry.is_src) continue;
-        const std::filesystem::path src =
-            index.src_path(entry.uid, entry.src_hash);
-        std::error_code ec;
-        if (!std::filesystem::exists(src, ec) && index.remove(entry)) {
+        bool should_remove = false;
+        if (timeline_scanned && active_uids.find(entry.uid) == active_uids.end()) {
+            // Object is no longer present on the timeline
+            should_remove = true;
+        } else if (!entry.is_src) {
+            // Glitch cache without source video is invalid
+            const std::filesystem::path src =
+                index.src_path(entry.uid, entry.src_hash);
+            std::error_code ec;
+            if (!std::filesystem::exists(src, ec)) {
+                should_remove = true;
+            }
+        }
+        if (should_remove && index.remove(entry)) {
             ++removed;
         }
     }
+
+    // Always clean up orphan .part files
     std::error_code ec;
     for (const auto& item :
          std::filesystem::directory_iterator(cache_dir, ec)) {

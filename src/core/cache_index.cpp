@@ -91,57 +91,74 @@ std::optional<CacheEntry> parse_cache_filename(const std::filesystem::path& path
     CacheEntry entry;
     entry.path = path;
 
-    // "<uid>-<srcHash>.src.mp4" — note ".src" is dot-separated.
+    // 1. "<uid>-<srcHash>.src.mp4" — note ".src" is dot-separated.
     if (ends_with(name, ".src.mp4")) {
         const std::string base = name.substr(0, name.size() - 8); // strip ".src.mp4"
-        std::vector<std::string> parts;
-        split_dashes(base, parts);
-        if (parts.size() != 2 || !is_hex16(parts[1])) return std::nullopt;
-        entry.uid = parts[0];
-        entry.src_hash = parts[1];
+        const std::size_t last_dash = base.rfind('-');
+        if (last_dash == std::string::npos || last_dash == 0) return std::nullopt;
+        const std::string uid = base.substr(0, last_dash);
+        const std::string src_hash = base.substr(last_dash + 1);
+        if (!is_hex16(src_hash)) return std::nullopt;
+        entry.uid = uid;
+        entry.src_hash = src_hash;
         entry.is_src = true;
         return entry;
     }
-    // "<uid>-<srcHash>-<glitchHash>.export.mp4"
+
+    // 2. "<uid>-<srcHash>-<glitchHash>.export.mp4"
     if (ends_with(name, ".export.mp4")) {
         const std::string base = name.substr(0, name.size() - 11); // strip ".export.mp4"
-        std::vector<std::string> parts;
-        split_dashes(base, parts);
-        if (parts.size() != 3 || !is_hex16(parts[1]) || !is_hex16(parts[2])) {
-            return std::nullopt;
-        }
-        entry.uid = parts[0];
-        entry.src_hash = parts[1];
-        entry.glitch_hash = parts[2];
+        const std::size_t dash2 = base.rfind('-');
+        if (dash2 == std::string::npos || dash2 == 0) return std::nullopt;
+        const std::size_t dash1 = base.rfind('-', dash2 - 1);
+        if (dash1 == std::string::npos || dash1 == 0) return std::nullopt;
+        const std::string uid = base.substr(0, dash1);
+        const std::string src_hash = base.substr(dash1 + 1, dash2 - dash1 - 1);
+        const std::string glitch_hash = base.substr(dash2 + 1);
+        if (!is_hex16(src_hash) || !is_hex16(glitch_hash)) return std::nullopt;
+        entry.uid = uid;
+        entry.src_hash = src_hash;
+        entry.glitch_hash = glitch_hash;
         entry.is_export = true;
         return entry;
     }
-    // "<uid>-<srcHash>-<glitchHash>[-g<gen>].mp4"
+
+    // 3. "<uid>-<srcHash>-<glitchHash>[-g<gen>].mp4"
     if (!ends_with(name, ".mp4")) return std::nullopt;
-    const std::string base = name.substr(0, name.size() - 4);
-    std::vector<std::string> parts;
-    split_dashes(base, parts);
-    if ((parts.size() == 3 || parts.size() == 4) && is_hex16(parts[1]) &&
-        is_hex16(parts[2])) {
-        entry.uid = parts[0];
-        entry.src_hash = parts[1];
-        entry.glitch_hash = parts[2];
-        entry.generation = 0;
-        if (parts.size() == 4) {
-            const std::string& g = parts[3];
-            if (g.size() < 2 || g[0] != 'g') return std::nullopt;
+    const std::string base = name.substr(0, name.size() - 4); // strip ".mp4"
+
+    int generation = 0;
+    std::string stem = base;
+    const std::size_t last_dash = stem.rfind('-');
+    if (last_dash != std::string::npos && last_dash > 0) {
+        const std::string part = stem.substr(last_dash + 1);
+        if (part.size() >= 2 && part[0] == 'g') {
             try {
-                entry.generation = std::stoi(g.substr(1));
-            } catch (...) {
-                return std::nullopt;
-            }
-            if (entry.generation < 1 || entry.generation >= kMaxGeneration) {
-                return std::nullopt;
-            }
+                int g = std::stoi(part.substr(1));
+                if (g >= 1 && g < kMaxGeneration) {
+                    generation = g;
+                    stem = stem.substr(0, last_dash);
+                }
+            } catch (...) {}
         }
-        return entry;
     }
-    return std::nullopt;
+
+    const std::size_t dash2 = stem.rfind('-');
+    if (dash2 == std::string::npos || dash2 == 0) return std::nullopt;
+    const std::size_t dash1 = stem.rfind('-', dash2 - 1);
+    if (dash1 == std::string::npos || dash1 == 0) return std::nullopt;
+
+    const std::string uid = stem.substr(0, dash1);
+    const std::string src_hash = stem.substr(dash1 + 1, dash2 - dash1 - 1);
+    const std::string glitch_hash = stem.substr(dash2 + 1);
+
+    if (!is_hex16(src_hash) || !is_hex16(glitch_hash)) return std::nullopt;
+
+    entry.uid = uid;
+    entry.src_hash = src_hash;
+    entry.glitch_hash = glitch_hash;
+    entry.generation = generation;
+    return entry;
 }
 
 std::filesystem::path CacheIndex::src_path(const std::string& uid,
